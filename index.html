@@ -1,0 +1,2273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pairup Recruitment Platform</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/bcryptjs/2.4.3/bcrypt.min.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+  <style>
+    :root {
+      --color-background-primary: #ffffff;
+      --color-background-secondary: #f8f9fb;
+      --color-background-tertiary: #f3f5f9;
+      --color-text-primary: #1f2937;
+      --color-text-secondary: #667085;
+      --color-border-secondary: #d0d5dd;
+      --color-border-tertiary: #eaecf0;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f3f5f9; color: #1f2937; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+const BRAND="#002C76",BRAND_LIGHT="#E8EDF7",BRAND_MID="#1A3F8F",BRAND_DIM="#6B85B8";
+const FONT="'Noto Sans Khmer',sans-serif";
+const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
+const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
+const GOOGLE_CLIENT_ID_KEY="pairup_google_client_id";
+const COMPANY_SIZES=["1–10","11–50","51–200","201–500","501–1000","1000+"];
+
+const INDUSTRIES=["Information Technology","Marketing & Communications","Finance & Banking","Retail & FMCG","Logistics & Supply Chain","Healthcare & Pharma","Education & Training","Manufacturing & Engineering","Real Estate","Game","Other"];
+const FIELDS=["Marketing","Human Resources","Finance","Information Technology","Sales","Operations","Legal","Product","Design","Engineering","Customer Success","Data & Analytics","Content & Creative","Other"];
+const LOCATIONS=["Ho Chi Minh City","Hanoi","Da Nang","Remote"];
+const LANG_OPTS=["English","Vietnamese","Japanese","Korean","Chinese","French","German","Spanish","Thai","Other"];
+const PROFICIENCY=["Native","Fluent","Advanced","Intermediate","Basic"];
+const YEARS_OPTS=["Fresher (0–1 yr)","1–2 years","3–5 years","5–7 years","7–10 years","10+ years"];
+const SALARY_OPTS=["Under 10M VND","10–15M VND","15–20M VND","20–30M VND","30–50M VND","50M+ VND","Negotiable"];
+const ONBOARD_OPTS=["Immediately","1 week","2 weeks","1 month","More than 1 month"];
+
+async function sd(k,v,s=false){
+  try { localStorage.setItem(k, JSON.stringify(v)); } catch(e) { console.error(e); }
+}
+async function ld(k,s=false){
+  try { const v=localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; }
+}
+async function nextCode(){const n=(await ld(SK.COUNTER,true))||0;const nx=n+1;await sd(SK.COUNTER,nx,true);return`#JS${String(nx).padStart(4,"0")}`;}
+function gid(){return Math.random().toString(36).substring(2,10).toUpperCase();}
+function gjid(){return"JD"+Math.random().toString(36).substring(2,8).toUpperCase();}
+function fmt(iso){return iso?new Date(iso).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}):"—";}
+
+// ── GOOGLE SHEETS SYNC ────────────────────────────────────────────────────────
+// Static pages can't write to a private Google Sheet directly; a small Google Apps
+// Script deployed as a Web App acts as the bridge. Paste its deployed URL into the
+// sync settings (cloud icon in the nav, admin-only via #admin). This is only used
+// for candidate profiles ("Job Seekers" sheet) and job applications ("Applied"
+// sheet) — account/login data is never sent here.
+async function pushToSheet(sheetName,data){
+  try{
+    const url=(await ld(GSHEET_URL_KEY,true))||"";
+    if(!url) return false;
+    await fetch(url,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({sheet:sheetName,data})});
+    return true;
+  }catch(e){ console.error("Sheet sync failed",e); return false; }
+}
+
+async function sendAutomationEmail(to,subject,body){
+  try{
+    const url=(await ld(GSHEET_URL_KEY,true))||"";
+    if(!url||!to) return false;
+    await fetch(url,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"send_email",to,subject,body})});
+    return true;
+  }catch(e){ console.error("Automation email failed",e); return false; }
+}
+
+// ── PASSWORD HASHING ──────────────────────────────────────────────────────────
+// Uses bcrypt (via CDN) as specified in the auth flow. Falls back to a salted
+// SHA-256 digest if bcrypt failed to load (e.g. offline), so signup/login still
+// work — clearly namespaced so verifyPassword can tell which scheme was used.
+// Note: since this is a fully static, client-side app there is no server to keep
+// a signing/pepper secret on — this is demo-grade, not a production auth system.
+async function hashPassword(pw){
+  try{
+    if(window.dcodeIO&&window.dcodeIO.bcrypt){
+      return window.dcodeIO.bcrypt.hashSync(pw,10);
+    }
+  }catch(e){}
+  const enc=new TextEncoder().encode("pairup-salt::"+pw);
+  const buf=await crypto.subtle.digest("SHA-256",enc);
+  const hex=Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+  return "sha256:"+hex;
+}
+async function verifyPassword(pw,hash){
+  if(!hash)return false;
+  if(hash.startsWith("sha256:")){
+    const enc=new TextEncoder().encode("pairup-salt::"+pw);
+    const buf=await crypto.subtle.digest("SHA-256",enc);
+    const hex=Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+    return "sha256:"+hex===hash;
+  }
+  try{
+    if(window.dcodeIO&&window.dcodeIO.bcrypt) return window.dcodeIO.bcrypt.compareSync(pw,hash);
+  }catch(e){}
+  return false;
+}
+function isStrongPassword(pw){
+  return !!pw && pw.length>=8 && /[A-Za-z]/.test(pw) && /[0-9]/.test(pw);
+}
+
+// ── GOOGLE SIGN-IN ────────────────────────────────────────────────────────────
+// Uses Google Identity Services (loaded via <script> in <head>). Requires a real
+// Google Cloud OAuth Client ID configured by the site admin (via #admin settings) —
+// with no client ID configured, this simply isn't available yet. Any Google account
+// can be used; pairup only matches it against an *existing* local account by email
+// (it does not create new accounts via Google).
+function googleGetEmail(){
+  return new Promise((resolve,reject)=>{
+    (async()=>{
+      const clientId=(await ld(GOOGLE_CLIENT_ID_KEY,true))||"";
+      if(!clientId){reject(new Error("not_configured"));return;}
+      if(!window.google||!window.google.accounts||!window.google.accounts.oauth2){reject(new Error("gsi_not_loaded"));return;}
+      try{
+        const client=window.google.accounts.oauth2.initTokenClient({
+          client_id:clientId,
+          scope:"openid email profile",
+          callback:async(resp)=>{
+            if(!resp||!resp.access_token){reject(new Error("no_token"));return;}
+            try{
+              const r=await fetch("https://www.googleapis.com/oauth2/v3/userinfo",{headers:{Authorization:`Bearer ${resp.access_token}`}});
+              const info=await r.json();
+              if(info&&info.email) resolve(info.email); else reject(new Error("no_email"));
+            }catch(e){reject(e);}
+          },
+          error_callback:(err)=>reject(err||new Error("popup_failed"))
+        });
+        client.requestAccessToken();
+      }catch(e){reject(e);}
+    })();
+  });
+}
+
+const Icon=({name,size=18,style={}})=><span className={`ti ti-${name}`} style={{fontSize:size,lineHeight:1,...style}} aria-hidden="true"/>;
+
+const Badge=({children,color="gray"})=>{
+  const map={gray:{bg:"#F0F2F7",c:"#444"},blue:{bg:BRAND_LIGHT,c:BRAND},amber:{bg:"#FEF3CD",c:"#7A4F00"},red:{bg:"#FDEAEA",c:"#8B1A1A"},green:{bg:"#E6F4EA",c:"#1A5C2A"},orange:{bg:"#FFF0E6",c:"#8A3800"},purple:{bg:"#F0EFFE",c:"#4A3A9E"}};
+  const m=map[color]||map.gray;
+  return <span style={{background:m.bg,color:m.c,fontSize:11,fontWeight:600,padding:"3px 10px",borderRadius:99,display:"inline-block",letterSpacing:0.2,fontFamily:FONT}}>{children}</span>;
+};
+
+const Btn=({children,onClick,variant="primary",style={},...p})=>{
+  const base={fontFamily:FONT,fontWeight:700,fontSize:13,borderRadius:8,cursor:"pointer",padding:"9px 18px",display:"inline-flex",alignItems:"center",gap:6,border:"none",transition:"opacity 0.15s"};
+  const v={primary:{background:BRAND,color:"#fff"},outline:{background:"none",border:`1.5px solid ${BRAND}`,color:BRAND},ghost:{background:"none",border:"1px solid var(--color-border-secondary)",color:"var(--color-text-secondary)"},danger:{background:"none",border:"1.5px solid #E24B4A",color:"#E24B4A"}};
+  return <button onClick={onClick} style={{...base,...v[variant],...style}} {...p}>{children}</button>;
+};
+
+const F=({label,error,required,children,hint})=>(
+  <div style={{marginBottom:"1.1rem"}}>
+    <label style={{display:"block",fontSize:12,fontWeight:700,marginBottom:4,color:"var(--color-text-primary)",fontFamily:FONT,textTransform:"uppercase",letterSpacing:0.5}}>
+      {label}{required&&<span style={{color:"#E24B4A",marginLeft:3}}>*</span>}
+    </label>
+    {hint&&<p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"0 0 5px",lineHeight:1.4}}>{hint}</p>}
+    {children}
+    {error&&<p style={{fontSize:11,color:"#E24B4A",margin:"3px 0 0"}}>{error}</p>}
+  </div>
+);
+
+const Card=({children,style={}})=><div style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16,padding:"1.5rem",marginBottom:"1.25rem",...style}}>{children}</div>;
+const SH=({icon,title})=><h3 style={{fontSize:11,fontWeight:800,margin:"0 0 1.25rem",color:BRAND,textTransform:"uppercase",letterSpacing:1.2,display:"flex",alignItems:"center",gap:6}}><Icon name={icon} size={14}/>{title}</h3>;
+const inp={width:"100%",boxSizing:"border-box",fontFamily:FONT};
+
+// Pill select helper
+const PillSel=({options,selected,onToggle,error})=>(
+  <div>
+    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+      {options.map(o=><button key={o} type="button" onClick={()=>onToggle(o)} style={{padding:"5px 14px",borderRadius:99,border:selected.includes(o)?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:selected.includes(o)?BRAND_LIGHT:"none",color:selected.includes(o)?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:12,fontWeight:selected.includes(o)?700:400,fontFamily:FONT,transition:"all 0.12s"}}>{o}</button>)}
+    </div>
+    {error&&<p style={{fontSize:11,color:"#E24B4A",margin:"4px 0 0"}}>{error}</p>}
+  </div>
+);
+
+// ── INDUSTRY PICKER with overflow → "Others" popup ───────────────────────────
+const INDUSTRY_INLINE=4; // show these inline; rest accessible via "Others" button
+
+function IndustryPicker({options=INDUSTRIES,selected,onToggle,error,inline=INDUSTRY_INLINE}){
+  const [open,setOpen]=useState(false);
+  const shown=options.slice(0,inline);
+  const rest=options.slice(inline);
+  const restSelected=rest.filter(o=>selected.includes(o));
+
+  return(
+    <div>
+      {/* Always one row: inline pills + "Others" button always visible */}
+      <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+        {shown.map(o=>(
+          <button key={o} type="button" onClick={()=>onToggle(o)} style={{padding:"5px 14px",borderRadius:99,border:selected.includes(o)?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:selected.includes(o)?BRAND_LIGHT:"none",color:selected.includes(o)?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:12,fontWeight:selected.includes(o)?700:400,fontFamily:FONT,whiteSpace:"nowrap",flexShrink:0,transition:"all 0.12s"}}>{o}</button>
+        ))}
+        {/* "Others" button — always rendered, never hidden */}
+        <button type="button" onClick={()=>setOpen(true)} style={{padding:"5px 14px",borderRadius:99,border:restSelected.length>0?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:restSelected.length>0?BRAND_LIGHT:"none",color:restSelected.length>0?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:12,fontWeight:restSelected.length>0?700:400,fontFamily:FONT,whiteSpace:"nowrap",flexShrink:0,display:"flex",alignItems:"center",gap:4,transition:"all 0.12s"}}>
+          <Icon name="plus" size={12}/>
+          {restSelected.length>0?`Others (${restSelected.length} selected)`:"Others"}
+        </button>
+      </div>
+      {/* Show any "rest" selections as chips below so they're visible */}
+      {restSelected.length>0&&(
+        <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:6}}>
+          {restSelected.map(o=>(
+            <span key={o} style={{display:"inline-flex",alignItems:"center",gap:5,background:BRAND_LIGHT,color:BRAND,fontSize:11,fontWeight:600,padding:"3px 10px",borderRadius:99,border:`1px solid ${BRAND}33`}}>
+              {o}
+              <button type="button" onClick={()=>onToggle(o)} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:13,lineHeight:1,padding:0,display:"flex",alignItems:"center"}}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
+      {error&&<p style={{fontSize:11,color:"#E24B4A",margin:"4px 0 0"}}>{error}</p>}
+      {/* Popup with ALL options */}
+      {open&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",zIndex:600,display:"flex",alignItems:"center",justifyContent:"center",padding:"1rem"}}>
+          <div style={{background:"#ffffff",borderRadius:20,width:"100%",maxWidth:500,padding:"1.75rem",boxShadow:"0 24px 60px rgba(0,44,118,0.18)",fontFamily:FONT}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1rem"}}>
+              <h3 style={{fontSize:15,fontWeight:800,margin:0,color:BRAND}}>All Industries</h3>
+              <button onClick={()=>setOpen(false)} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,width:32,height:32,borderRadius:"50%",fontSize:16,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {options.map(o=>(
+                <button key={o} type="button" onClick={()=>onToggle(o)} style={{padding:"7px 18px",borderRadius:99,border:selected.includes(o)?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:selected.includes(o)?BRAND_LIGHT:"none",color:selected.includes(o)?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:13,fontWeight:selected.includes(o)?700:400,fontFamily:FONT,transition:"all 0.12s"}}>{o}</button>
+              ))}
+            </div>
+            <div style={{marginTop:"1.25rem",display:"flex",justifyContent:"space-between",alignItems:"center",paddingTop:"1rem",borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+              <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}><strong>{selected.filter(x=>options.includes(x)).length}</strong> selected</p>
+              <Btn onClick={()=>setOpen(false)} style={{fontSize:13,padding:"8px 20px"}}>Done</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Reusable single-select filter pill (fits one row, overflow in popup)
+function FilterPills({title,options,value,onChange,inline=6}){
+  const [open,setOpen]=useState(false);
+  const shown=options.slice(0,inline);
+  const rest=options.slice(inline);
+  const restActive=rest.includes(value);
+  return(
+    <div style={{marginBottom:"0.875rem"}}>
+      <p style={{fontSize:11,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"0 0 7px"}}>{title}</p>
+      <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"nowrap",overflow:"hidden"}}>
+        <button onClick={()=>onChange("")} style={{padding:"5px 12px",borderRadius:99,border:value===""?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:value===""?BRAND_LIGHT:"none",color:value===""?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:11,fontWeight:value===""?700:400,fontFamily:FONT,whiteSpace:"nowrap",flexShrink:0}}>All</button>
+        {shown.map(o=><button key={o} onClick={()=>onChange(o===value?"":o)} style={{padding:"5px 12px",borderRadius:99,border:value===o?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:value===o?BRAND_LIGHT:"none",color:value===o?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:11,fontWeight:value===o?700:400,fontFamily:FONT,whiteSpace:"nowrap",flexShrink:0}}>{o}</button>)}
+        {rest.length>0&&<button onClick={()=>setOpen(true)} style={{padding:"5px 12px",borderRadius:99,border:restActive?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:restActive?BRAND_LIGHT:"none",color:restActive?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:11,fontWeight:restActive?700:400,fontFamily:FONT,whiteSpace:"nowrap",flexShrink:0,display:"flex",alignItems:"center",gap:3}}><Icon name="plus" size={11}/>{rest.length} more</button>}
+      </div>
+      {open&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",zIndex:600,display:"flex",alignItems:"center",justifyContent:"center",padding:"1rem"}}>
+          <div style={{background:"#ffffff",borderRadius:20,width:"100%",maxWidth:460,padding:"1.75rem",boxShadow:"0 24px 60px rgba(0,44,118,0.18)",fontFamily:FONT}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1rem"}}>
+              <h3 style={{fontSize:15,fontWeight:800,margin:0,color:BRAND}}>All {title}</h3>
+              <button onClick={()=>setOpen(false)} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,width:30,height:30,borderRadius:"50%",fontSize:15,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {options.map(o=><button key={o} onClick={()=>{onChange(o===value?"":o);setOpen(false);}} style={{padding:"6px 16px",borderRadius:99,border:value===o?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:value===o?BRAND_LIGHT:"none",color:value===o?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:13,fontWeight:value===o?700:400,fontFamily:FONT}}>{o}</button>)}
+            </div>
+            <div style={{marginTop:"1.25rem",textAlign:"right"}}><Btn variant="outline" onClick={()=>setOpen(false)} style={{fontSize:13,padding:"7px 18px"}}>Close</Btn></div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function LanguagePicker({languages,onChange,error}){
+  // languages = [{lang:"English",level:"Fluent"}, ...]
+  const [adding,setAdding]=useState(false);
+  const [newLang,setNewLang]=useState("");
+  const [newLevel,setNewLevel]=useState("Fluent");
+  const [customLang,setCustomLang]=useState("");
+
+  const addLang=()=>{
+    const name=newLang==="Other"?customLang.trim():newLang;
+    if(!name)return;
+    if(languages.find(l=>l.lang===name))return;
+    onChange([...languages,{lang:name,level:newLevel}]);
+    setNewLang("");setCustomLang("");setNewLevel("Fluent");setAdding(false);
+  };
+  const removeLang=(l)=>onChange(languages.filter(x=>x.lang!==l));
+  const updateLevel=(l,level)=>onChange(languages.map(x=>x.lang===l?{...x,level}:x));
+
+  return(
+    <div>
+      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:languages.length>0?10:0}}>
+        {languages.map(l=>(
+          <div key={l.lang} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:BRAND_LIGHT,borderRadius:10,border:`1px solid ${BRAND}22`}}>
+            <Icon name="language" size={14} style={{color:BRAND,flexShrink:0}}/>
+            <span style={{fontWeight:700,fontSize:13,color:BRAND,flex:1}}>{l.lang}</span>
+            <select value={l.level} onChange={e=>updateLevel(l.lang,e.target.value)} style={{width:"auto",fontFamily:FONT,fontSize:12,padding:"4px 8px",border:`1px solid ${BRAND}44`,borderRadius:6,background:"#fff",color:BRAND,fontWeight:600}}>
+              {PROFICIENCY.map(p=><option key={p}>{p}</option>)}
+            </select>
+            <button type="button" onClick={()=>removeLang(l.lang)} style={{background:"none",border:"none",cursor:"pointer",color:"#E24B4A",fontSize:16,lineHeight:1,padding:"0 2px"}}>×</button>
+          </div>
+        ))}
+      </div>
+
+      {adding?(
+        <div style={{background:"var(--color-background-secondary)",borderRadius:10,padding:"12px",border:"0.5px solid var(--color-border-secondary)"}}>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+            <select value={newLang} onChange={e=>setNewLang(e.target.value)} style={{...inp,width:"auto",flex:2,minWidth:140}}>
+              <option value="">Select language…</option>
+              {LANG_OPTS.filter(o=>!languages.find(l=>l.lang===o)).map(o=><option key={o}>{o}</option>)}
+            </select>
+            <select value={newLevel} onChange={e=>setNewLevel(e.target.value)} style={{...inp,width:"auto",flex:1,minWidth:110}}>
+              {PROFICIENCY.map(p=><option key={p}>{p}</option>)}
+            </select>
+          </div>
+          {newLang==="Other"&&<input style={{...inp,marginBottom:8}} value={customLang} onChange={e=>setCustomLang(e.target.value)} placeholder="Specify language…"/>}
+          <div style={{display:"flex",gap:8}}>
+            <Btn onClick={addLang} style={{fontSize:12,padding:"6px 14px"}} disabled={!newLang}>Add</Btn>
+            <Btn variant="ghost" onClick={()=>{setAdding(false);setNewLang("");setCustomLang("");}} style={{fontSize:12,padding:"6px 14px"}}>Cancel</Btn>
+          </div>
+        </div>
+      ):(
+        <button type="button" onClick={()=>setAdding(true)} style={{display:"flex",alignItems:"center",gap:6,padding:"7px 14px",borderRadius:8,border:`1.5px dashed ${BRAND}`,background:"none",color:BRAND,cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:FONT}}>
+          <Icon name="plus" size={14}/>Add language
+        </button>
+      )}
+      {error&&<p style={{fontSize:11,color:"#E24B4A",margin:"4px 0 0"}}>{error}</p>}
+    </div>
+  );
+}
+
+// ── AD MODAL ──────────────────────────────────────────────────────────────────
+function AdModal({onDone}){
+  const [t,setT]=useState(5);
+  useEffect(()=>{if(t<=0)return;const id=setInterval(()=>setT(x=>x-1),1000);return()=>clearInterval(id);},[t]);
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,20,60,0.7)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:"1rem"}}>
+      <div style={{background:"#fff",borderRadius:20,padding:"2rem",maxWidth:420,width:"100%",textAlign:"center",fontFamily:FONT}}>
+        <div style={{background:BRAND_LIGHT,borderRadius:12,padding:"2.5rem 1rem",marginBottom:"1.5rem",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
+          <Icon name="speakerphone" size={36} style={{color:BRAND,marginBottom:8}}/>
+          <p style={{fontSize:15,fontWeight:700,color:BRAND,margin:"0 0 4px"}}>Sponsored by pairup</p>
+          <p style={{fontSize:12,color:BRAND_DIM,margin:0}}>Your gateway to top-tier talent</p>
+          <p style={{fontSize:11,color:BRAND_DIM,margin:"10px 0 0",opacity:0.6}}>Advertisement</p>
+        </div>
+        {t>0?<p style={{color:"var(--color-text-secondary)",fontSize:13}}>Content available in <strong>{t}s</strong></p>:<Btn onClick={onDone} style={{width:"100%",justifyContent:"center"}}>Continue →</Btn>}
+      </div>
+    </div>
+  );
+}
+
+// ── NAV ───────────────────────────────────────────────────────────────────────
+function Nav({page,setPage,notifCount,role,onLogout,onDeleteAccount,onOpenSync,showSync,onOpenNotifs}){
+  const tabs=role==="jobseeker"
+    ?[{id:"candidate",label:"My Profile",icon:"user"},{id:"public",label:"Talent Pool",icon:"users"},{id:"jobs",label:"Jobs",icon:"briefcase"}]
+    :[{id:"employer",label:"Employer",icon:"building"},{id:"public",label:"Talent Pool",icon:"users"}];
+  const [showMenu,setShowMenu]=useState(false);
+  return(
+    <nav style={{background:BRAND,padding:"0 2rem",display:"flex",alignItems:"center",position:"sticky",top:0,zIndex:100,fontFamily:FONT}}>
+      <div style={{color:"#fff",fontWeight:800,fontSize:28,letterSpacing:-1.5,marginRight:"2rem",paddingRight:"2rem",borderRight:"1px solid rgba(255,255,255,0.18)",paddingTop:14,paddingBottom:14,whiteSpace:"nowrap"}}>
+        <span style={{opacity:0.45,fontWeight:400}}>pair</span><span style={{fontWeight:800}}>up</span>
+      </div>
+      {tabs.map(t=>(
+        <button key={t.id} onClick={()=>setPage(t.id)} style={{background:"none",border:"none",cursor:"pointer",color:page===t.id?"#fff":"rgba(255,255,255,0.58)",fontWeight:page===t.id?700:400,fontSize:13,padding:"16px 14px",borderBottom:page===t.id?"2px solid #7BA7F5":"2px solid transparent",display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap",fontFamily:FONT}}>
+          <Icon name={t.icon} size={15}/>{t.label}
+        </button>
+      ))}
+      {showSync&&<button onClick={onOpenSync} title="Google Sheets sync" aria-label="Sync settings" style={{marginLeft:"auto",width:40,height:40,border:"none",background:"none",color:"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10}}>
+        <Icon name="cloud" size={19}/>
+      </button>}
+      <button onClick={onOpenNotifs} title="Notifications" aria-label="Notifications" style={{position:"relative",width:40,height:40,border:"none",background:"none",color:page==="notifications"?"#fff":"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10,marginLeft:showSync?0:"auto"}}>
+        <Icon name="bell" size={20}/>
+        {notifCount>0&&<span style={{position:"absolute",top:2,right:1,minWidth:16,height:16,padding:"0 4px",borderRadius:99,background:"#FF6B6B",color:"#fff",fontSize:10,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center"}}>{notifCount>99?"99+":notifCount}</span>}
+      </button>
+      <div style={{position:"relative"}}>
+        <button onClick={()=>setShowMenu(m=>!m)} title="Settings" aria-label="Settings" style={{marginLeft:8,width:40,height:40,border:"none",background:showMenu?"rgba(255,255,255,0.15)":"none",color:"rgba(255,255,255,0.85)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10}}>
+          <Icon name="settings" size={19}/>
+        </button>
+        {showMenu&&<>
+          <div onClick={()=>setShowMenu(false)} style={{position:"fixed",inset:0,zIndex:150}}/>
+          <div style={{position:"absolute",top:46,right:0,background:"#fff",borderRadius:12,boxShadow:"0 8px 28px rgba(0,20,60,0.25)",minWidth:180,zIndex:160,overflow:"hidden",fontFamily:FONT}}>
+            <button onClick={()=>{setShowMenu(false);onLogout();}} style={{width:"100%",textAlign:"left",padding:"11px 16px",background:"none",border:"none",cursor:"pointer",fontSize:13,fontWeight:600,color:"var(--color-text-primary)",display:"flex",alignItems:"center",gap:8,fontFamily:FONT}}><Icon name="logout" size={15}/>Log out</button>
+            <button onClick={()=>{setShowMenu(false);onDeleteAccount();}} style={{width:"100%",textAlign:"left",padding:"11px 16px",background:"none",border:"none",borderTop:"0.5px solid var(--color-border-tertiary)",cursor:"pointer",fontSize:13,fontWeight:600,color:"#E24B4A",display:"flex",alignItems:"center",gap:8,fontFamily:FONT}}><Icon name="trash" size={15}/>Delete account</button>
+          </div>
+        </>}
+      </div>
+    </nav>
+  );
+}
+
+// ── AUTH (SIGN UP / LOG IN) ───────────────────────────────────────────────────
+function AuthPage({role,onAuthed,onBack}){
+  const accountsKey=role==="jobseeker"?SK.ACCOUNTS_JS:SK.ACCOUNTS_EMP;
+  const [mode,setMode]=useState("login"); // "login" | "signup" | "forgot" | "reset"
+  const [form,setForm]=useState({email:"",password:"",confirm:""});
+  const [resetForm,setResetForm]=useState({password:"",confirm:""});
+  const [resetToken,setResetToken]=useState(null); // {email,token}
+  const [forgotSent,setForgotSent]=useState(false);
+  const [showPw,setShowPw]=useState(false);
+  const [showPw2,setShowPw2]=useState(false);
+  const [remember,setRemember]=useState(true);
+  const [errors,setErrors]=useState({});
+  const [notice,setNotice]=useState("");
+  const [busy,setBusy]=useState(false);
+  const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const MAX_ATTEMPTS=5, LOCK_MS=15*60*1000;
+
+  const persistSession=async(session)=>{
+    if(remember){
+      await sd(SK.SESSION,{...session,expiresAt:Date.now()+7*24*60*60*1000},true);
+      try{sessionStorage.removeItem(SK.SESSION);}catch(e){}
+    }else{
+      await sd(SK.SESSION,null,true); // ensure no stale 7-day session lingers
+      try{sessionStorage.setItem(SK.SESSION,JSON.stringify(session));}catch(e){}
+    }
+  };
+
+  const switchMode=(m)=>{setMode(m);setErrors({});setNotice("");};
+
+  // ── Sign up ──────────────────────────────────────────────────────────────
+  const doSignup=async()=>{
+    const e={};
+    if(!form.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/))e.email="Invalid email format";
+    if(!isStrongPassword(form.password))e.password="At least 8 characters, with letters and numbers";
+    if(form.confirm!==form.password)e.confirm="Passwords do not match";
+    if(Object.keys(e).length){setErrors(e);return;}
+    setBusy(true);
+    const accounts=(await ld(accountsKey,true))||[];
+    const emailNorm=form.email.trim().toLowerCase();
+    if(accounts.find(a=>a.email.toLowerCase()===emailNorm)){
+      setBusy(false);
+      setErrors({email:"Email already exists. Please log in instead."});
+      return;
+    }
+    const code=role==="jobseeker"?await nextCode():("CO"+gid());
+    const passwordHash=await hashPassword(form.password);
+    const account={email:form.email.trim(),passwordHash,code,createdAt:new Date().toISOString(),failedAttempts:0,lockedUntil:null,active:true};
+    await sd(accountsKey,[...accounts,account],true);
+    const session={role,email:account.email,code,token:gid()+gid()};
+    await persistSession(session);
+    setBusy(false);
+    onAuthed(session);
+  };
+
+  // ── Log in ───────────────────────────────────────────────────────────────
+  const doLogin=async()=>{
+    const e={};
+    if(!form.email.trim())e.email="Required";
+    if(!form.password)e.password="Required";
+    if(Object.keys(e).length){setErrors(e);return;}
+    setBusy(true);
+    const accounts=(await ld(accountsKey,true))||[];
+    const emailNorm=form.email.trim().toLowerCase();
+    const idx=accounts.findIndex(a=>a.email.toLowerCase()===emailNorm);
+    if(idx===-1){
+      setBusy(false);
+      setErrors({email:"This email is not registered."});
+      return;
+    }
+    const account=accounts[idx];
+    if(account.lockedUntil&&account.lockedUntil>Date.now()){
+      setBusy(false);
+      const mins=Math.ceil((account.lockedUntil-Date.now())/60000);
+      setErrors({password:`Account is temporarily locked due to too many failed attempts. Try again in ${mins} minute${mins!==1?"s":""}.`});
+      return;
+    }
+    const ok=await verifyPassword(form.password,account.passwordHash);
+    if(!ok){
+      const updated=[...accounts];
+      const attempts=(account.failedAttempts||0)+1;
+      updated[idx]={...account,failedAttempts:attempts,lockedUntil:attempts>=MAX_ATTEMPTS?Date.now()+LOCK_MS:null};
+      await sd(accountsKey,updated,true);
+      setBusy(false);
+      setErrors({password:attempts>=MAX_ATTEMPTS?`Too many failed attempts. Account locked for 15 minutes.`:"Incorrect password."});
+      return;
+    }
+    if(account.active===false){
+      setBusy(false);
+      setErrors({password:"This account has been deactivated."});
+      return;
+    }
+    const updated=[...accounts];
+    updated[idx]={...account,failedAttempts:0,lockedUntil:null};
+    await sd(accountsKey,updated,true);
+    const session={role,email:account.email,code:account.code,token:gid()+gid()};
+    await persistSession(session);
+    setBusy(false);
+    onAuthed(session);
+  };
+
+  // ── Sign in with Google (matches an existing pairup account by email) ──────
+  const doGoogleSignIn=async()=>{
+    setNotice("");setErrors({});
+    setBusy(true);
+    try{
+      const email=await googleGetEmail();
+      const accounts=(await ld(accountsKey,true))||[];
+      const emailNorm=email.trim().toLowerCase();
+      const account=accounts.find(a=>a.email.toLowerCase()===emailNorm);
+      if(!account){
+        setBusy(false);
+        setNotice(`No pairup account found for ${email} under this role. Please sign up first, or make sure you selected the right role (${role==="jobseeker"?"Job Seeker":"Employer"}).`);
+        return;
+      }
+      const session={role,email:account.email,code:account.code,token:gid()+gid()};
+      await persistSession(session);
+      setBusy(false);
+      onAuthed(session);
+    }catch(err){
+      setBusy(false);
+      if(err&&err.message==="not_configured"){
+        setNotice("Google Sign-In isn't set up for this deployment yet — please use email/password.");
+      }else if(err&&err.message==="gsi_not_loaded"){
+        setNotice("Google Sign-In is still loading — please try again in a moment, or use email/password.");
+      }else{
+        setNotice("Google Sign-In was cancelled or failed. Please try again, or use email/password.");
+      }
+    }
+  };
+
+  // ── Forgot / reset password ─────────────────────────────────────────────
+  const doForgot=async()=>{
+    if(!form.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)){setErrors({email:"Invalid email format"});return;}
+    setBusy(true);
+    const accounts=(await ld(accountsKey,true))||[];
+    const emailNorm=form.email.trim().toLowerCase();
+    const idx=accounts.findIndex(a=>a.email.toLowerCase()===emailNorm);
+    let token=null;
+    if(idx!==-1){
+      token=gid()+gid();
+      const updated=[...accounts];
+      updated[idx]={...accounts[idx],resetToken:token,resetExpiresAt:Date.now()+30*60*1000};
+      await sd(accountsKey,updated,true);
+    }
+    // Always the same message, whether or not the email exists (avoids account enumeration)
+    setResetToken({email:form.email.trim(),token}); // token may be null if email wasn't found
+    setForgotSent(true);
+    setBusy(false);
+  };
+
+  const doReset=async()=>{
+    const e={};
+    if(!isStrongPassword(resetForm.password))e.password="At least 8 characters, with letters and numbers";
+    if(resetForm.confirm!==resetForm.password)e.confirm="Passwords do not match";
+    if(Object.keys(e).length){setErrors(e);return;}
+    setBusy(true);
+    const accounts=(await ld(accountsKey,true))||[];
+    const idx=accounts.findIndex(a=>a.email.toLowerCase()===(resetToken?.email||"").toLowerCase()
+      && a.resetToken && resetToken?.token && a.resetToken===resetToken.token
+      && a.resetExpiresAt && a.resetExpiresAt>Date.now());
+    if(idx===-1){
+      setBusy(false);
+      setErrors({password:"This reset link is invalid or has expired. Please request a new one."});
+      return;
+    }
+    const passwordHash=await hashPassword(resetForm.password);
+    const updated=[...accounts];
+    updated[idx]={...accounts[idx],passwordHash,resetToken:null,resetExpiresAt:null,failedAttempts:0,lockedUntil:null};
+    await sd(accountsKey,updated,true);
+    setBusy(false);
+    setNotice("Your password has been reset. Please log in.");
+    setForm({email:resetToken?.email||"",password:"",confirm:""});
+    setResetToken(null);setForgotSent(false);
+    switchMode("login");
+    setNotice("Your password has been reset. Please log in.");
+  };
+
+  const submit=mode==="signup"?doSignup:mode==="forgot"?doForgot:mode==="reset"?doReset:doLogin;
+  const onKey=e=>{ if(e.key==="Enter"){ e.preventDefault(); submit(); } };
+  const eyeBtn=(shown,toggle)=>(
+    <button type="button" onClick={toggle} tabIndex={-1} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"var(--color-text-secondary)",padding:4,display:"flex"}}>
+      <Icon name={shown?"eye-off":"eye"} size={16}/>
+    </button>
+  );
+
+  return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:"2rem",fontFamily:FONT,background:"var(--color-background-tertiary)"}}>
+      <div style={{width:"100%",maxWidth:440}}>
+        <button onClick={onBack} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:13,fontWeight:700,fontFamily:FONT,display:"flex",alignItems:"center",gap:6,marginBottom:"1.25rem"}}><Icon name="arrow-left" size={14}/>Back</button>
+        <Card>
+          <form onSubmit={e=>{e.preventDefault();submit();}}>
+            {mode!=="reset"&&<h2 style={{fontSize:20,fontWeight:800,margin:"0 0 10px",display:"flex",alignItems:"center",gap:8,color:"var(--color-text-primary)"}}>
+              Welcome to <span style={{color:BRAND,fontWeight:800,letterSpacing:-0.5}}><span style={{opacity:.45,fontWeight:400}}>pair</span>up</span>
+            </h2>}
+
+            {mode==="login"&&<>
+              <p style={{fontSize:12.5,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"0 0 1.25rem"}}>By signing in, you agree to pairup's <a href="#" onClick={ev=>ev.preventDefault()} style={{color:BRAND}}>Terms &amp; Conditions</a> and <a href="#" onClick={ev=>ev.preventDefault()} style={{color:BRAND}}>Privacy Policy</a> in relation to your privacy information.</p>
+              <button type="button" onClick={doGoogleSignIn} disabled={busy} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:10,padding:"12px",border:`1px solid ${BRAND}`,borderRadius:8,background:"#fff",color:BRAND,fontWeight:700,fontSize:14,cursor:"pointer",fontFamily:FONT,marginBottom:"1.25rem"}}>
+                <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.9 32.5 29.4 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l6-6C34.5 6 29.5 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.9 19 13 24 13c3.1 0 5.8 1.1 8 3l6-6C34.5 6 29.5 4 24 4c-7.7 0-14.3 4.3-17.7 10.7z"/><path fill="#4CAF50" d="M24 44c5.3 0 10.1-2 13.7-5.4l-6.3-5.3C29.4 35 26.9 36 24 36c-5.4 0-9.9-3.5-11.3-8.3l-6.6 5.1C9.6 39.7 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.9 2.6-2.7 4.8-5 6.3l6.3 5.3C39.8 36.9 44 31.1 44 24c0-1.2-.1-2.3-.4-3.5z"/></svg>
+                Sign In with Google
+              </button>
+              <div style={{display:"flex",alignItems:"center",gap:12,margin:"0 0 1.25rem",color:"var(--color-text-secondary)",fontSize:12}}>
+                <div style={{flex:1,height:1,background:"var(--color-border-tertiary)"}}/>or<div style={{flex:1,height:1,background:"var(--color-border-tertiary)"}}/>
+              </div>
+            </>}
+
+            {mode==="signup"&&<p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"0 0 1.25rem"}}>{role==="jobseeker"?"One account per email address.":"One account represents one company."}</p>}
+
+            {notice&&mode!=="reset"&&!forgotSent&&<div style={{background:BRAND_LIGHT,color:BRAND,fontSize:12,borderRadius:8,padding:"10px 12px",marginBottom:"1rem"}}>{notice}</div>}
+
+            {(mode==="login"||mode==="signup")&&<>
+              <F label="Email" error={errors.email} required><input style={inp} type="email" value={form.email} onChange={e=>sf("email",e.target.value)} onKeyDown={onKey} placeholder="Email"/></F>
+              <F label={<span style={{display:"flex",justifyContent:"space-between",width:"100%"}}><span>Password <span style={{color:"#E24B4A"}}>*</span></span>{mode==="login"&&<button type="button" onClick={()=>{switchMode("forgot");setForgotSent(false);}} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:12,fontWeight:700,fontFamily:FONT,padding:0}}>Forgot password?</button>}</span>} error={errors.password} noAsterisk>
+                <div style={{position:"relative"}}>
+                  <input style={{...inp,paddingRight:36}} type={showPw?"text":"password"} value={form.password} onChange={e=>sf("password",e.target.value)} onKeyDown={onKey} placeholder="Password"/>
+                  {eyeBtn(showPw,()=>setShowPw(v=>!v))}
+                </div>
+              </F>
+              {mode==="signup"&&<F label="Confirm Password" error={errors.confirm} required>
+                <div style={{position:"relative"}}>
+                  <input style={{...inp,paddingRight:36}} type={showPw2?"text":"password"} value={form.confirm} onChange={e=>sf("confirm",e.target.value)} onKeyDown={onKey} placeholder="Confirm Password"/>
+                  {eyeBtn(showPw2,()=>setShowPw2(v=>!v))}
+                </div>
+              </F>}
+              <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"var(--color-text-primary)",cursor:"pointer",margin:"4px 0 4px"}}>
+                <input type="checkbox" checked={remember} onChange={e=>setRemember(e.target.checked)} style={{width:16,height:16,accentColor:BRAND}}/>
+                Remember me for 7 days
+              </label>
+              <Btn onClick={submit} disabled={busy} style={{width:"100%",justifyContent:"center",padding:"13px",marginTop:8,fontSize:14}}>{busy?"Please wait…":(mode==="signup"?"Sign Up":"Sign In with Email")}</Btn>
+              <p style={{fontSize:13,color:"var(--color-text-primary)",textAlign:"center",marginTop:16,marginBottom:0}}>
+                {mode==="login"
+                  ?<>Do not have an account? <button type="button" onClick={()=>switchMode("signup")} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontWeight:700,fontFamily:FONT,fontSize:13,padding:0}}>Sign up now!</button></>
+                  :<>Already have an account? <button type="button" onClick={()=>switchMode("login")} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontWeight:700,fontFamily:FONT,fontSize:13,padding:0}}>Log in</button></>}
+              </p>
+            </>}
+
+            {mode==="forgot"&&<>
+              {!forgotSent?(<>
+                <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"0 0 1rem"}}>Enter your email and we'll help you reset your password.</p>
+                <F label="Email" error={errors.email} required><input style={inp} type="email" value={form.email} onChange={e=>sf("email",e.target.value)} onKeyDown={onKey} placeholder="Email"/></F>
+                <Btn onClick={submit} disabled={busy} style={{width:"100%",justifyContent:"center",padding:"13px",marginTop:6}}>{busy?"Please wait…":"Send reset instructions"}</Btn>
+              </>):(<>
+                <div style={{background:BRAND_LIGHT,color:BRAND,borderRadius:10,padding:"1rem",fontSize:13,lineHeight:1.6,marginBottom:"1rem"}}>If an account with that email exists, password reset instructions have been sent.</div>
+                <div style={{background:"#FFF7E6",border:"1px solid #FFE1A8",borderRadius:10,padding:"1rem",fontSize:12,lineHeight:1.6,color:"#7A5B00"}}>
+                  <strong>Demo mode:</strong> no email service is connected here, so instead of emailing the link, you can continue directly.
+                  <button type="button" onClick={()=>switchMode("reset")} style={{display:"block",marginTop:8,background:BRAND,color:"#fff",border:"none",borderRadius:8,padding:"9px 14px",cursor:"pointer",fontWeight:700,fontFamily:FONT,fontSize:12}}>Continue to reset password →</button>
+                </div>
+              </>)}
+              <p style={{fontSize:13,color:"var(--color-text-primary)",textAlign:"center",marginTop:16,marginBottom:0}}>
+                <button type="button" onClick={()=>{switchMode("login");setForgotSent(false);}} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontWeight:700,fontFamily:FONT,fontSize:13,padding:0}}>← Back to log in</button>
+              </p>
+            </>}
+
+            {mode==="reset"&&<>
+              <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"0 0 1rem"}}>Choose a new password for your account.</p>
+              <F label="New Password" error={errors.password} required>
+                <div style={{position:"relative"}}>
+                  <input style={{...inp,paddingRight:36}} type={showPw?"text":"password"} value={resetForm.password} onChange={e=>setResetForm(f=>({...f,password:e.target.value}))} onKeyDown={onKey} placeholder="New password"/>
+                  {eyeBtn(showPw,()=>setShowPw(v=>!v))}
+                </div>
+              </F>
+              <F label="Confirm New Password" error={errors.confirm} required>
+                <div style={{position:"relative"}}>
+                  <input style={{...inp,paddingRight:36}} type={showPw2?"text":"password"} value={resetForm.confirm} onChange={e=>setResetForm(f=>({...f,confirm:e.target.value}))} onKeyDown={onKey} placeholder="Confirm new password"/>
+                  {eyeBtn(showPw2,()=>setShowPw2(v=>!v))}
+                </div>
+              </F>
+              <Btn onClick={submit} disabled={busy} style={{width:"100%",justifyContent:"center",padding:"13px",marginTop:6}}>{busy?"Please wait…":"Reset password"}</Btn>
+            </>}
+          </form>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+// ── EMPLOYER COMPANY PROFILE (required once per employer account) ────────────
+function CompanyProfilePage({session,onSaved,existing}){
+  const blank={name:"",industry:"",taxCode:"",address:"",intro:"",website:"",teamSize:""};
+  const [form,setForm]=useState(existing?{name:existing.name||"",industry:existing.industry||"",taxCode:existing.taxCode||"",address:existing.address||"",intro:existing.intro||"",website:existing.website||"",teamSize:existing.teamSize||""}:blank);
+  const [errors,setErrors]=useState({});
+  const s=(k,v)=>setForm(f=>({...f,[k]:v}));
+
+  const validate=()=>{
+    const e={};
+    if(!form.name.trim())e.name="Required";
+    if(!form.industry)e.industry="Required";
+    if(!form.taxCode.trim())e.taxCode="Required";
+    if(!form.address.trim())e.address="Required";
+    if(!form.intro.trim())e.intro="Required";
+    if(!form.website.trim())e.website="Required";
+    if(!form.teamSize)e.teamSize="Required";
+    return e;
+  };
+
+  const submit=async()=>{
+    const e=validate();if(Object.keys(e).length){setErrors(e);return;}
+    const company={...form,code:session.code,email:session.email,createdAt:new Date().toISOString()};
+    const all=(await ld(SK.COMPANIES,true))||[];
+    const i=all.findIndex(c=>c.code===session.code);
+    if(i>=0)all[i]=company;else all.push(company);
+    await sd(SK.COMPANIES,all,true);
+    onSaved(company);
+  };
+
+  return(
+    <div style={{maxWidth:680,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
+      <div style={{marginBottom:"1.5rem"}}>
+        <h1 style={{fontSize:24,fontWeight:800,margin:"0 0 6px",color:BRAND}}>Tell us about your company</h1>
+        <p style={{color:"var(--color-text-secondary)",fontSize:13,margin:0}}>This is required before you can post jobs. Each account represents one company. All fields are required.</p>
+      </div>
+      <Card>
+        <SH icon="building" title="Company Information"/>
+        <F label="Company name" error={errors.name} required><input style={inp} value={form.name} onChange={e=>s("name",e.target.value)}/></F>
+        <F label="Industry" error={errors.industry} required><select style={inp} value={form.industry} onChange={e=>s("industry",e.target.value)}><option value="">-- Select --</option>{INDUSTRIES.map(i=><option key={i}>{i}</option>)}</select></F>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
+          <F label="Tax code" error={errors.taxCode} required><input style={inp} value={form.taxCode} onChange={e=>s("taxCode",e.target.value)}/></F>
+          <F label="Company website" error={errors.website} required><input style={inp} value={form.website} onChange={e=>s("website",e.target.value)} placeholder="https://…"/></F>
+        </div>
+        <F label="Company address" error={errors.address} required><input style={inp} value={form.address} onChange={e=>s("address",e.target.value)}/></F>
+        <F label="Number of employees" error={errors.teamSize} required><select style={inp} value={form.teamSize} onChange={e=>s("teamSize",e.target.value)}><option value="">-- Select --</option>{COMPANY_SIZES.map(sz=><option key={sz}>{sz}</option>)}</select></F>
+        <F label="Company overview" error={errors.intro} required hint="A short introduction about your company"><textarea style={{...inp,minHeight:100}} value={form.intro} onChange={e=>s("intro",e.target.value)}/></F>
+      </Card>
+      <Btn onClick={submit} style={{width:"100%",justifyContent:"center",padding:"13px"}}>Save and continue →</Btn>
+    </div>
+  );
+}
+
+// ── SYNC SETTINGS (Google Sheets bridge URL) ──────────────────────────────────
+function SyncSettingsModal({onClose}){
+  const [url,setUrl]=useState("");
+  const [clientId,setClientId]=useState("");
+  const [saved,setSaved]=useState(false);
+  useEffect(()=>{
+    ld(GSHEET_URL_KEY,true).then(u=>setUrl(u||""));
+    ld(GOOGLE_CLIENT_ID_KEY,true).then(c=>setClientId(c||""));
+  },[]);
+  const save=async()=>{
+    await sd(GSHEET_URL_KEY,url.trim(),true);
+    await sd(GOOGLE_CLIENT_ID_KEY,clientId.trim(),true);
+    setSaved(true);setTimeout(()=>setSaved(false),1800);
+  };
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",zIndex:600,display:"flex",alignItems:"center",justifyContent:"center",padding:"1rem"}}>
+      <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:520,padding:"1.75rem",fontFamily:FONT}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1rem"}}>
+          <h3 style={{fontSize:15,fontWeight:800,margin:0,color:BRAND}}>Integrations</h3>
+          <button onClick={onClose} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,width:30,height:30,borderRadius:"50%",fontSize:15,fontWeight:700}}>✕</button>
+        </div>
+        <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"0 0 1rem"}}>Paste the deployed Google Apps Script Web App URL that writes to your "Job Seekers" and "Applied" sheets, and sends automation/contact-request emails. Account/login data is never sent here.</p>
+        <F label="Web App URL"><input style={inp} value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/…/exec"/></F>
+        <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"1.25rem 0 1rem"}}>Google Sign-In requires an OAuth Client ID from Google Cloud Console with this page's origin added as an authorized JavaScript origin.</p>
+        <F label="Google OAuth Client ID"><input style={inp} value={clientId} onChange={e=>setClientId(e.target.value)} placeholder="xxxxxxxxxx.apps.googleusercontent.com"/></F>
+        <Btn onClick={save} style={{width:"100%",justifyContent:"center"}}>{saved?"Saved ✓":"Save"}</Btn>
+      </div>
+    </div>
+  );
+}
+
+function RoleSelection({onSelect}){
+  return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:"2rem",fontFamily:FONT,background:"var(--color-background-tertiary)"}}>
+      <div style={{width:"100%",maxWidth:820,textAlign:"center"}}>
+        <div style={{color:BRAND,fontWeight:800,fontSize:48,letterSpacing:-2,marginBottom:8}}><span style={{opacity:.45,fontWeight:400}}>pair</span><span style={{fontWeight:800}}>up</span></div>
+        <h1 style={{fontSize:30,fontWeight:800,margin:"0 0 8px",color:BRAND}}>How would you like to use pairup?</h1>
+        <p style={{fontSize:14,color:"var(--color-text-secondary)",margin:"0 0 2rem"}}>Choose your journey to get started.</p>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:18}}>
+          {[
+            {id:"jobseeker",title:"For Job Seekers",desc:"Create your profile, discover opportunities, and track your applications.",icon:"user-search"},
+            {id:"employer",title:"For Employers",desc:"Post jobs, discover talent, and manage candidates who apply.",icon:"building"}
+          ].map(x=>(
+            <button key={x.id} onClick={()=>onSelect(x.id)} style={{textAlign:"left",padding:"2rem",background:"#fff",border:`1.5px solid ${BRAND}22`,borderRadius:20,cursor:"pointer",fontFamily:FONT,boxShadow:"0 8px 30px rgba(0,44,118,0.08)"}}>
+              <div style={{width:54,height:54,borderRadius:14,background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:18}}><Icon name={x.icon} size={26} style={{color:BRAND}}/></div>
+              <h2 style={{fontSize:20,color:BRAND,margin:"0 0 8px",fontWeight:800}}>{x.title}</h2>
+              <p style={{fontSize:13,lineHeight:1.6,color:"var(--color-text-secondary)",margin:0}}>{x.desc}</p>
+              <div style={{marginTop:18,color:BRAND,fontWeight:700,fontSize:13}}>Continue →</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── MY PROFILE ────────────────────────────────────────────────────────────────
+function CandidatePage({onSubmit,refresh,session,initialTab}){
+  const LKEY="pairup_my_profile_"+session.email;
+  const blank={name:"",email:session.email,phone:"",social:"",position:"",field:"",locations:[],industries:[],skills:"",years:"",languages:[],intro:"",onboard:"",salary:"",portfolio:"",cvLink:"",consentPool:false,consentStore:false};
+  const [profile,setProfile]=useState(null); // null = not yet loaded
+  const [ready,setReady]=useState(false);    // true once storage check done
+  const [mode,setMode]=useState("view");     // "view" | "edit"
+  const [tab,setTab]=useState(initialTab||"info");       // "info" | "requests" | "applied"
+  const [form,setForm]=useState(blank);
+  const [submitted,setSubmitted]=useState(null);
+  const [errors,setErrors]=useState({});
+  const [requests,setRequests]=useState([]);
+  const [selReq,setSelReq]=useState(null);
+  const [shareOn,setShareOn]=useState(false);
+  const [appliedJobs,setAppliedJobs]=useState([]);
+  const [profileEvents,setProfileEvents]=useState([]);
+  const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
+
+  // Load profile from storage once
+  useEffect(()=>{
+    ld(LKEY).then(p=>{
+      if(p){setProfile(p);setShareOn(p.shareActive||false);}
+      setReady(true);
+    });
+  },[refresh]);
+
+  // Load requests whenever profile changes
+  useEffect(()=>{
+    if(profile?.code){
+      Promise.all([ld(SK.REQUESTS,true),ld(SK.APPLICATIONS,true)]).then(([r,a])=>{
+        setRequests((r||[]).filter(x=>x.candidateCode===profile.code));
+        setAppliedJobs((a||[]).filter(x=>x.candidateCode===profile.code || (x.email&&x.email===profile.email)));
+      });
+      setProfileEvents(profile.profileEvents||[]);
+    }
+  },[profile,refresh]);
+
+  // ── Helpers ──
+  const persist=async(c)=>{
+    await sd(LKEY,c);
+    const all=(await ld(SK.CANDIDATES,true))||[];
+    const i=all.findIndex(x=>x.code===c.code);
+    if(i>=0)all[i]=c;else all.push(c);
+    await sd(SK.CANDIDATES,all,true);
+  };
+
+  const validate=()=>{
+    const e={};
+    if(!form.name.trim())e.name="Required";
+    if(!form.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/))e.email="Invalid email";
+    if(!form.phone.trim())e.phone="Required";
+    if(!form.position.trim())e.position="Required";
+    if(!form.field)e.field="Required";
+    if(form.locations.length===0)e.locations="Select at least one";
+    if(form.industries.length===0)e.industries="Select at least one";
+    if(!form.skills.trim())e.skills="Required";
+    if(!form.years)e.years="Required";
+    if(form.languages.length===0)e.languages="Add at least one language";
+    if(!form.intro.trim())e.intro="Required";
+    if(!form.onboard)e.onboard="Required";
+    if(!form.salary)e.salary="Required";
+    if(!form.consentStore)e.consentStore="You must agree to data storage";
+    return e;
+  };
+
+  const openEdit=()=>{
+    const s=profile||{};
+    setForm({name:s.name||"",email:s.email||"",phone:s.phone||"",social:s.social||"",position:s.position||"",field:s.field||"",locations:s.locations||[],industries:s.industries||[],skills:s.skills||"",years:s.years||"",languages:s.languages||[],intro:s.intro||"",onboard:s.onboard||"",salary:s.salary||"",portfolio:s.portfolio||"",cvLink:s.cvLink||"",consentPool:s.shareActive||false,consentStore:!!s.code});
+    setErrors({});setMode("edit");
+  };
+
+  const doToggleShare=async(val)=>{
+    if(!profile){openEdit();return;}
+    const u={...profile,shareActive:val,consentPool:val};
+    await persist(u);setShareOn(val);setProfile(u);onSubmit();
+  };
+
+  const doSubmit=async()=>{
+    const e=validate();if(Object.keys(e).length){setErrors(e);return;}
+    const code=session.code;
+    const c={...form,code,createdAt:new Date().toISOString(),status:"active",shareActive:form.consentPool};
+    await persist(c);setProfile(c);setShareOn(form.consentPool);setSubmitted(code);onSubmit();
+    pushToSheet("Job Seekers",c);
+  };
+
+  const doUpdate=async()=>{
+    const e=validate();if(Object.keys(e).length){setErrors(e);return;}
+    const c={...profile,...form,updatedAt:new Date().toISOString(),shareActive:form.consentPool};
+    await persist(c);setProfile(c);setMode("view");onSubmit();
+    pushToSheet("Job Seekers",c);
+  };
+
+  const doRespond=async(req,action)=>{
+    const all=(await ld(SK.REQUESTS,true))||[];
+    const i=all.findIndex(r=>r.id===req.id);
+    if(i>=0){all[i].status=action;await sd(SK.REQUESTS,all,true);}
+    const notifs=(await ld(SK.NOTIFS,true))||[];
+    notifs.push({id:gid(),type:"response",to:req.employerEmail||"employer",candidateCode:profile.code,companyName:req.company,position:req.title,action,createdAt:new Date().toISOString(),read:false});
+    await sd(SK.NOTIFS,notifs,true);
+    setRequests(r=>r.map(x=>x.id===req.id?{...x,status:action}:x));
+    setSelReq(null);onSubmit();
+  };
+
+  // Wait for storage to load before rendering
+  if(!ready)return(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",padding:"4rem",fontFamily:FONT}}>
+      <Icon name="loader-2" size={24} style={{color:BRAND,animation:"spin 1s linear infinite"}}/>
+    </div>
+  );
+
+  // ── SUCCESS screen ──
+  if(submitted)return(
+    <div style={{maxWidth:500,margin:"4rem auto",textAlign:"center",padding:"0 1.5rem",fontFamily:FONT}}>
+      <div style={{width:72,height:72,borderRadius:"50%",background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 1.5rem"}}>
+        <Icon name="check" size={34} style={{color:BRAND}}/>
+      </div>
+      <h2 style={{fontWeight:800,fontSize:24,margin:"0 0 0.5rem",color:BRAND}}>Profile saved!</h2>
+      <p style={{color:"var(--color-text-secondary)",marginBottom:"2rem",lineHeight:1.6,fontSize:14}}>Your profile is ready. Employers will reach out when a suitable role arises.</p>
+      <div style={{background:BRAND_LIGHT,borderRadius:16,padding:"1.5rem 2rem",marginBottom:"1.5rem",border:`1.5px solid ${BRAND}22`}}>
+        <p style={{fontSize:10,color:BRAND,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1.5}}>Your Candidate Code</p>
+        <p style={{fontSize:42,fontWeight:800,letterSpacing:4,color:BRAND,margin:0,fontFamily:"monospace"}}>{submitted}</p>
+      </div>
+      <Btn variant="outline" onClick={()=>{setSubmitted(null);setMode("view");}} style={{marginTop:"0.5rem"}}>View my profile →</Btn>
+    </div>
+  );
+
+  // ── REQUEST DETAIL ──
+  if(selReq)return(
+    <div style={{maxWidth:700,margin:"0 auto",fontFamily:FONT,paddingBottom:"4rem"}}>
+      <div style={{background:BRAND,padding:"1rem 2rem",display:"flex",alignItems:"center",gap:12,position:"sticky",top:48,zIndex:90}}>
+        <button onClick={()=>setSelReq(null)} style={{background:"rgba(255,255,255,0.15)",border:"none",cursor:"pointer",color:"#fff",width:32,height:32,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+          <Icon name="arrow-left" size={15}/>
+        </button>
+        <div style={{flex:1}}>
+          <p style={{color:"rgba(255,255,255,0.65)",fontSize:11,margin:0,fontFamily:FONT}}>Contact Request from</p>
+          <p style={{color:"#fff",fontWeight:800,fontSize:16,margin:0,fontFamily:FONT}}>{selReq.company}</p>
+        </div>
+        <Badge color={selReq.status==="pending"?"amber":selReq.status==="accepted"?"green":"red"}>
+          {selReq.status==="pending"?"Awaiting reply":selReq.status==="accepted"?"Accepted":"Declined"}
+        </Badge>
+      </div>
+      <div style={{padding:"1.5rem 2rem"}}>
+        <Card>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"14px 28px"}}>
+            {[["Company",selReq.company],["Position",selReq.title],["Offered Salary",selReq.salary||"—"],["Contact Person",selReq.contactName||"—"],["Contact Email",selReq.contactEmail||"—"],["Contact Phone",selReq.contactPhone||"—"]].map(([l,v])=>(
+              <div key={l} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",paddingBottom:10}}>
+                <p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.8,margin:"0 0 4px"}}>{l}</p>
+                <p style={{fontSize:14,fontWeight:500,margin:0}}>{v}</p>
+              </div>
+            ))}
+          </div>
+        </Card>
+        {selReq.jd&&<Card><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.8,margin:"0 0 10px"}}>Job Description</p><p style={{fontSize:14,lineHeight:1.8,margin:0}}>{selReq.jd}</p></Card>}
+        {selReq.benefits&&<Card><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.8,margin:"0 0 10px"}}>Benefits</p><p style={{fontSize:14,lineHeight:1.8,margin:0}}>{selReq.benefits}</p></Card>}
+        {selReq.status==="pending"?(
+          <div style={{display:"flex",gap:10,marginTop:8}}>
+            <Btn onClick={()=>doRespond(selReq,"accepted")} style={{flex:1,justifyContent:"center",fontSize:14,padding:"13px"}}>
+              <Icon name="check" size={15}/>Agree — share my contact
+            </Btn>
+            <Btn variant="danger" onClick={()=>doRespond(selReq,"denied")} style={{flex:1,justifyContent:"center",fontSize:14,padding:"13px"}}>
+              <Icon name="x" size={15}/>Deny
+            </Btn>
+          </div>
+        ):(
+          <div style={{padding:"1.25rem",background:selReq.status==="accepted"?BRAND_LIGHT:"#FDEAEA",borderRadius:14,textAlign:"center",fontWeight:700,fontSize:15,color:selReq.status==="accepted"?BRAND:"#8B1A1A",border:`1.5px solid ${selReq.status==="accepted"?BRAND+"33":"#E24B4A33"}`}}>
+            {selReq.status==="accepted"?"✓ You accepted — your contact info was shared":"✕ You declined this request"}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // ── EDIT FORM ──
+  if(mode==="edit")return(
+    <div style={{maxWidth:700,margin:"2rem auto",padding:"0 1rem 5rem",fontFamily:FONT}}>
+      <button onClick={()=>setMode("view")} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:13,fontWeight:600,fontFamily:FONT,marginBottom:"1.5rem",display:"flex",alignItems:"center",gap:6}}>
+        <Icon name="arrow-left" size={14}/>Back to profile
+      </button>
+      <div style={{marginBottom:"2rem"}}>
+        <h1 style={{fontSize:24,fontWeight:800,margin:"0 0 4px"}}>{profile?"Update your profile":"Complete your profile"}</h1>
+        <p style={{color:"var(--color-text-secondary)",fontSize:13,margin:0}}>All fields required unless marked optional</p>
+      </div>
+
+      {/* CV Link */}
+      <Card>
+        <SH icon="link" title="CV / Resume"/>
+        <F label="CV link" hint="Paste a shareable link to your CV (Google Drive, Dropbox, OneDrive, Notion, or another public link).">
+          <input style={inp} type="url" value={form.cvLink} onChange={e=>sf("cvLink",e.target.value)} placeholder="https://drive.google.com/..."/>
+        </F>
+        <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"-0.5rem 0 0"}}>Your CV link is private and will only be shared with an employer after you accept their contact request.</p>
+      </Card>
+
+      {/* Personal */}
+      <Card>
+        <SH icon="user-circle" title="Personal Information"/>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
+          <F label="Full name" error={errors.name} required><input style={inp} value={form.name} onChange={e=>sf("name",e.target.value)} placeholder="Jane Smith"/></F>
+          <F label="Email" error={errors.email} required><input style={inp} type="email" value={form.email} onChange={e=>sf("email",e.target.value)} placeholder="jane@example.com"/></F>
+          <F label="Phone" error={errors.phone} required><input style={inp} value={form.phone} onChange={e=>sf("phone",e.target.value)} placeholder="+84 9xx xxx xxx"/></F>
+          <F label="Social links (Facebook, LinkedIn…)"><input style={inp} value={form.social} onChange={e=>sf("social",e.target.value)} placeholder="https://linkedin.com/in/…"/></F>
+        </div>
+      </Card>
+
+      {/* Career */}
+      <Card>
+        <SH icon="briefcase" title="Career Preferences"/>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
+          <F label="Desired position" error={errors.position} required><input style={inp} value={form.position} onChange={e=>sf("position",e.target.value)} placeholder="e.g. Senior Product Designer"/></F>
+          <F label="Field" error={errors.field} required>
+            <select style={inp} value={form.field} onChange={e=>sf("field",e.target.value)}>
+              <option value="">-- Select field --</option>
+              {FIELDS.map(f=><option key={f}>{f}</option>)}
+            </select>
+          </F>
+        </div>
+        <F label="Preferred location(s)" error={errors.locations} required>
+          <PillSel options={LOCATIONS} selected={form.locations} onToggle={l=>sf("locations",form.locations.includes(l)?form.locations.filter(x=>x!==l):[...form.locations,l])} error={errors.locations}/>
+        </F>
+        <F label="Industry (select all that apply)" error={errors.industries} required>
+          <IndustryPicker selected={form.industries} onToggle={i=>sf("industries",form.industries.includes(i)?form.industries.filter(x=>x!==i):[...form.industries,i])} error={errors.industries}/>
+        </F>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
+          <F label="Years of experience" error={errors.years} required>
+            <select style={inp} value={form.years} onChange={e=>sf("years",e.target.value)}>
+              <option value="">-- Select --</option>
+              {YEARS_OPTS.map(o=><option key={o}>{o}</option>)}
+            </select>
+          </F>
+          <F label="Salary expectation" error={errors.salary} required>
+            <select style={inp} value={form.salary} onChange={e=>sf("salary",e.target.value)}>
+              <option value="">-- Select --</option>
+              {SALARY_OPTS.map(o=><option key={o}>{o}</option>)}
+            </select>
+          </F>
+        </div>
+        <F label="Languages" error={errors.languages} required>
+          <LanguagePicker languages={form.languages} onChange={v=>sf("languages",v)} error={errors.languages}/>
+        </F>
+        <F label="Key skills" error={errors.skills} required>
+          <input style={inp} value={form.skills} onChange={e=>sf("skills",e.target.value)} placeholder="e.g. React, Node.js, Figma, SQL…"/>
+        </F>
+        <F label="Professional summary" error={errors.intro} required>
+          <textarea style={{...inp,minHeight:100,resize:"vertical"}} value={form.intro} onChange={e=>sf("intro",e.target.value)} placeholder="Brief overview of your background, achievements, and career goals…"/>
+        </F>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
+          <F label="Portfolio link"><input style={inp} value={form.portfolio} onChange={e=>sf("portfolio",e.target.value)} placeholder="https://your-portfolio.com"/></F>
+          <F label="Available to start" error={errors.onboard} required>
+            <select style={inp} value={form.onboard} onChange={e=>sf("onboard",e.target.value)}>
+              <option value="">-- Select --</option>
+              {ONBOARD_OPTS.map(o=><option key={o}>{o}</option>)}
+            </select>
+          </F>
+        </div>
+      </Card>
+
+      {/* Consent */}
+      <Card>
+        <SH icon="shield-check" title="Privacy & Consent"/>
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          <label style={{display:"flex",alignItems:"flex-start",gap:10,cursor:"pointer",padding:"1rem",background:BRAND_LIGHT,borderRadius:10,border:`1px solid ${form.consentPool?BRAND:BRAND_LIGHT}`}}>
+            <input type="checkbox" checked={form.consentPool} onChange={e=>sf("consentPool",e.target.checked)} style={{marginTop:3,accentColor:BRAND,width:16,height:16,flexShrink:0}}/>
+            <span style={{fontSize:13,color:BRAND_MID,lineHeight:1.6,fontFamily:FONT}}>
+              <strong>I agree to the display of my work history within the Talent Pool.</strong> (Contact details, social channels and CV are strictly excluded from this view.)
+            </span>
+          </label>
+          <label style={{display:"flex",alignItems:"flex-start",gap:10,cursor:"pointer",padding:"1rem",background:"#F8F9FB",borderRadius:10,border:`1px solid ${form.consentStore?BRAND:"var(--color-border-tertiary)"}`}}>
+            <input type="checkbox" checked={form.consentStore} onChange={e=>sf("consentStore",e.target.checked)} style={{marginTop:3,accentColor:BRAND,width:16,height:16,flexShrink:0}}/>
+            <span style={{fontSize:13,color:"var(--color-text-primary)",lineHeight:1.6,fontFamily:FONT}}>
+              <strong>By submitting this form, I allow pairup to securely store my personal information.</strong> Your data will <strong>NEVER BE SHARED</strong> without your explicit approval.
+            </span>
+          </label>
+          {errors.consentStore&&<p style={{fontSize:11,color:"#E24B4A",margin:0}}>{errors.consentStore}</p>}
+        </div>
+      </Card>
+
+      <Btn onClick={profile?doUpdate:doSubmit} style={{width:"100%",justifyContent:"center",fontSize:15,padding:"14px"}}>
+        {profile?"Save changes →":"Submit profile →"}
+      </Btn>
+    </div>
+  );
+
+  // ── PROFILE VIEW (ALWAYS shown by default, blank if no data) ──
+  const p=profile||{};
+  const pendingCount=requests.filter(r=>r.status==="pending").length;
+
+  const InfoCell=({label,value,link})=>(
+    <div style={{borderBottom:"0.5px solid var(--color-border-tertiary)",paddingBottom:12}}>
+      <p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.8,margin:"0 0 5px"}}>{label}</p>
+      {link&&value
+        ?<a href={value} target="_blank" rel="noreferrer" style={{fontSize:14,color:BRAND,fontWeight:500,wordBreak:"break-all"}}>{value}</a>
+        :<p style={{fontSize:14,fontWeight:value?500:400,margin:0,color:value?"var(--color-text-primary)":"#bbb",fontStyle:value?"normal":"italic"}}>{value||"—"}</p>
+      }
+    </div>
+  );
+
+  return(
+    <div style={{maxWidth:800,margin:"0 auto",paddingBottom:"4rem",fontFamily:FONT}}>
+
+      {/* ── HERO HEADER ── */}
+      <div style={{background:BRAND,padding:"2rem 2rem 0"}}>
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16,flexWrap:"wrap",marginBottom:"1.5rem"}}>
+          {/* Avatar + name */}
+          <div style={{display:"flex",gap:16,alignItems:"center",flex:1,minWidth:200}}>
+            <div style={{width:64,height:64,borderRadius:"50%",background:"rgba(255,255,255,0.12)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,border:"2px solid rgba(255,255,255,0.2)"}}>
+              <Icon name="user" size={28} style={{color:"rgba(255,255,255,0.9)"}}/>
+            </div>
+            <div>
+              <h1 style={{color:p.name?"#fff":"rgba(255,255,255,0.35)",fontWeight:800,fontSize:20,margin:"0 0 3px",fontStyle:p.name?"normal":"italic"}}>
+                {p.name||"Your name here"}
+              </h1>
+              <p style={{color:p.position?"rgba(255,255,255,0.75)":"rgba(255,255,255,0.3)",fontSize:13,margin:"0 0 6px",fontStyle:p.position?"normal":"italic"}}>
+                {p.position||"Desired position"}
+              </p>
+              {p.code&&<span style={{fontFamily:"monospace",fontSize:11,background:"rgba(255,255,255,0.15)",color:"rgba(255,255,255,0.85)",padding:"2px 10px",borderRadius:6,fontWeight:700,letterSpacing:1}}>{p.code}</span>}
+            </div>
+          </div>
+          {/* Action buttons */}
+          <div style={{display:"flex",gap:8,flexWrap:"wrap",flexShrink:0}}>
+            <button onClick={openEdit} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"9px 16px",borderRadius:8,border:"1.5px solid rgba(255,255,255,0.35)",background:"rgba(255,255,255,0.1)",color:"#fff",cursor:"pointer",fontFamily:FONT,fontWeight:700,fontSize:13}}>
+              <Icon name="edit" size={13}/>{profile?"Update information":"Complete profile"}
+            </button>
+            <button onClick={()=>doToggleShare(!shareOn)} style={{display:"inline-flex",alignItems:"center",gap:8,padding:"9px 16px",borderRadius:8,border:`1.5px solid ${shareOn?"rgba(255,255,255,0.6)":"rgba(255,255,255,0.25)"}`,background:shareOn?"rgba(255,255,255,0.15)":"rgba(255,255,255,0.06)",color:"#fff",cursor:"pointer",fontFamily:FONT,fontWeight:700,fontSize:13}}>
+              <span style={{width:30,height:17,borderRadius:99,background:shareOn?"#4ADE80":"rgba(255,255,255,0.25)",position:"relative",display:"inline-block",flexShrink:0}}>
+                <span style={{position:"absolute",top:2,left:shareOn?13:2,width:13,height:13,borderRadius:"50%",background:"#fff",transition:"left 0.2s"}}/>
+              </span>
+              {shareOn?"Sharing to Talent Pool":"Share profile"}
+            </button>
+          </div>
+        </div>
+        {/* Stats bar */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",background:"rgba(0,0,0,0.2)",borderRadius:"10px 10px 0 0",overflow:"hidden"}}>
+          {[["Salary",p.salary,"currency"],["Experience",p.years,"clock"],["Location",(p.locations||[]).slice(0,1).join("") ,"map-pin"],["Available",p.onboard,"calendar"]].map(([l,v,ic])=>(
+            <div key={l} style={{padding:"0.75rem 1rem",borderRight:"0.5px solid rgba(255,255,255,0.08)"}}>
+              <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:3}}>
+                <Icon name={ic} size={10} style={{color:"rgba(255,255,255,0.45)"}}/>
+                <p style={{fontSize:9,fontWeight:700,color:"rgba(255,255,255,0.45)",textTransform:"uppercase",letterSpacing:0.7,margin:0}}>{l}</p>
+              </div>
+              <p style={{fontSize:12,fontWeight:700,color:v?"#fff":"rgba(255,255,255,0.25)",margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontStyle:v?"normal":"italic"}}>{v||"—"}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── TABS ── */}
+      <div style={{background:"var(--color-background-primary)",borderBottom:"0.5px solid var(--color-border-tertiary)",display:"flex",padding:"0 2rem",position:"sticky",top:48,zIndex:80}}>
+        {[["info","My Information","file-description",0],["requests","Contact Requests","mail",pendingCount],["applied","Applied Jobs","briefcase",appliedJobs.length]].map(([id,label,icon,badge])=>(
+          <button key={id} onClick={()=>setTab(id)} style={{background:"none",border:"none",cursor:"pointer",padding:"13px 0",marginRight:24,color:tab===id?BRAND:"var(--color-text-secondary)",fontWeight:tab===id?700:400,fontSize:13,borderBottom:tab===id?`2.5px solid ${BRAND}`:"2.5px solid transparent",fontFamily:FONT,display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap",transition:"color 0.15s"}}>
+            <Icon name={icon} size={14}/>{label}
+            {id==="applied"?(badge>0&&<span style={{color:"inherit",fontWeight:400,fontSize:13}}>({badge})</span>):(badge>0&&<span style={{background:"#FF6B6B",color:"#fff",fontSize:10,fontWeight:700,borderRadius:99,padding:"1px 6px",minWidth:16,textAlign:"center"}}>{badge}</span>)}
+          </button>
+        ))}
+      </div>
+
+      {/* ── TAB CONTENT ── */}
+      <div style={{padding:"1.5rem 2rem"}}>
+
+        {/* MY INFORMATION TAB */}
+        {tab==="info"&&(
+          <>
+            {/* Overall Information */}
+            <div style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16,padding:"1.5rem",marginBottom:"1.25rem"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1.25rem",flexWrap:"wrap",gap:8}}>
+                <h3 style={{fontSize:12,fontWeight:800,color:BRAND,margin:0,textTransform:"uppercase",letterSpacing:1,display:"flex",alignItems:"center",gap:6}}>
+                  <Icon name="id-badge-2" size={14}/>Overall Information
+                </h3>
+                {!profile&&(
+                  <span style={{fontSize:11,background:"#FEF3CD",color:"#7A4F00",padding:"3px 12px",borderRadius:99,fontWeight:700}}>Profile not yet completed</span>
+                )}
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"14px 32px"}}>
+                <InfoCell label="Full Name" value={p.name}/>
+                <InfoCell label="Email" value={p.email}/>
+                <InfoCell label="Phone" value={p.phone}/>
+                <InfoCell label="Social Links" value={p.social}/>
+                <InfoCell label="Desired Position" value={p.position}/>
+                <InfoCell label="Expected Salary" value={p.salary}/>
+                <InfoCell label="Portfolio" value={p.portfolio} link/>
+                <InfoCell label="CV / Resume" value={p.cvLink} link/>
+              </div>
+              {!profile&&(
+                <div style={{marginTop:"1.25rem",background:BRAND_LIGHT,borderRadius:10,padding:"0.875rem 1rem",display:"flex",alignItems:"center",gap:12}}>
+                  <Icon name="info-circle" size={18} style={{color:BRAND,flexShrink:0}}/>
+                  <p style={{fontSize:13,color:BRAND,margin:0,flex:1}}>Complete your profile so employers can find you.</p>
+                  <button onClick={openEdit} style={{padding:"7px 16px",borderRadius:8,background:BRAND,color:"#fff",border:"none",cursor:"pointer",fontWeight:700,fontSize:12,fontFamily:FONT,whiteSpace:"nowrap"}}>Complete now →</button>
+                </div>
+              )}
+            </div>
+
+            {/* Career Details */}
+            <div style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16,padding:"1.5rem",marginBottom:"1.25rem"}}>
+              <h3 style={{fontSize:12,fontWeight:800,color:BRAND,margin:"0 0 1.25rem",textTransform:"uppercase",letterSpacing:1,display:"flex",alignItems:"center",gap:6}}>
+                <Icon name="briefcase" size={14}/>Career Details
+              </h3>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"14px 32px",marginBottom:"1.25rem"}}>
+                <InfoCell label="Field" value={p.field}/>
+                <InfoCell label="Years of Experience" value={p.years}/>
+                <InfoCell label="Available to Start" value={p.onboard}/>
+              </div>
+              {[["Preferred Locations",p.locations||[],"blue"],["Industries",p.industries||[],"blue"]].map(([l,items,color])=>(
+                <div key={l} style={{marginBottom:"1rem"}}>
+                  <p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.8,margin:"0 0 8px"}}>{l}</p>
+                  {items.length>0
+                    ?<div style={{display:"flex",gap:5,flexWrap:"wrap"}}>{items.map(i=><Badge key={i} color={color}>{i}</Badge>)}</div>
+                    :<p style={{fontSize:13,color:"#bbb",margin:0,fontStyle:"italic"}}>Not provided</p>
+                  }
+                </div>
+              ))}
+              <div style={{marginBottom:"1rem"}}>
+                <p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.8,margin:"0 0 8px"}}>Languages</p>
+                {(p.languages||[]).length>0
+                  ?<div style={{display:"flex",gap:6,flexWrap:"wrap"}}>{(p.languages||[]).map(l=><span key={l.lang} style={{background:BRAND_LIGHT,color:BRAND,fontSize:12,fontWeight:600,padding:"4px 12px",borderRadius:99,display:"inline-flex",alignItems:"center",gap:4}}>{l.lang}<span style={{opacity:0.5,fontSize:10}}>· {l.level}</span></span>)}</div>
+                  :<p style={{fontSize:13,color:"#bbb",margin:0,fontStyle:"italic"}}>Not provided</p>
+                }
+              </div>
+              <div style={{marginBottom:p.intro?"1rem":"0"}}>
+                <p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.8,margin:"0 0 6px"}}>Key Skills</p>
+                <p style={{fontSize:14,margin:0,lineHeight:1.6,color:p.skills?"var(--color-text-primary)":"#bbb",fontStyle:p.skills?"normal":"italic"}}>{p.skills||"Not provided"}</p>
+              </div>
+              {p.intro&&(
+                <div style={{marginTop:"1rem"}}>
+                  <p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.8,margin:"0 0 8px"}}>Professional Summary</p>
+                  <p style={{fontSize:14,lineHeight:1.8,margin:0}}>{p.intro}</p>
+                </div>
+              )}
+            </div>
+
+            {/* Sharing status */}
+            {profile&&(!shareOn?(
+              <div style={{background:"#FEF3CD",borderRadius:12,padding:"1rem 1.25rem",display:"flex",alignItems:"center",gap:12,border:"1px solid #F59E0B33"}}>
+                <Icon name="eye-off" size={18} style={{color:"#7A4F00",flexShrink:0}}/>
+                <div style={{flex:1}}>
+                  <p style={{fontWeight:700,fontSize:13,color:"#7A4F00",margin:"0 0 2px"}}>Your profile is private</p>
+                  <p style={{fontSize:12,color:"#92400E",margin:0}}>Enable "Share profile" to appear in the Talent Pool.</p>
+                </div>
+                <button onClick={()=>doToggleShare(true)} style={{padding:"7px 14px",borderRadius:8,border:"1.5px solid #7A4F00",background:"none",color:"#7A4F00",cursor:"pointer",fontWeight:700,fontSize:12,fontFamily:FONT,whiteSpace:"nowrap"}}>Share now</button>
+              </div>
+            ):(
+              <div style={{background:"#E6F4EA",borderRadius:12,padding:"1rem 1.25rem",display:"flex",alignItems:"center",gap:10,border:"1px solid #1A5C2A33"}}>
+                <Icon name="eye" size={18} style={{color:"#1A5C2A",flexShrink:0}}/>
+                <p style={{fontSize:13,color:"#1A5C2A",margin:0,fontWeight:600}}>Visible in the Talent Pool — contact details are hidden until you approve each request.</p>
+              </div>
+            ))}
+          </>
+        )}
+
+        {/* APPLIED JOBS TAB */}
+        {tab==="applied"&&(
+          <div>
+            <div style={{marginBottom:"1rem"}}>
+              <h2 style={{fontSize:16,fontWeight:800,margin:"0 0 3px",color:BRAND}}>Applied Jobs</h2>
+              <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>Track the jobs you have applied for and employer activity on your profile.</p>
+            </div>
+            {appliedJobs.length===0?(
+              <div style={{textAlign:"center",padding:"3rem 1rem",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16}}>
+                <Icon name="briefcase-off" size={36} style={{color:BRAND_DIM,display:"block",margin:"0 auto 12px"}}/>
+                <p style={{fontWeight:700,fontSize:15,margin:"0 0 6px"}}>No applied jobs yet</p>
+                <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>Your applications will appear here.</p>
+              </div>
+            ):(
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {appliedJobs.map(a=>(
+                  <div key={a.id} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:14,padding:"1rem 1.25rem"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"flex-start"}}>
+                      <div>
+                        <p style={{fontWeight:800,fontSize:15,color:BRAND,margin:"0 0 4px"}}>{a.jobTitle}</p>
+                        <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}>{a.company} · Applied {fmt(a.createdAt)}</p>
+                      </div>
+                      <Badge color={a.status==="rejected"?"red":a.status==="passed"?"green":(!a.status||a.status==="applied")?"blue":"amber"}>{a.status==="rejected"?"Rejected":a.status==="passed"?"Passed":(!a.status||a.status==="applied")?"Applied":"Processing"}</Badge>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* CONTACT REQUESTS TAB */}
+        {tab==="requests"&&(
+          <div>
+            <div style={{marginBottom:"1rem"}}>
+              <h2 style={{fontSize:16,fontWeight:800,margin:"0 0 3px",color:BRAND}}>Contact Requests</h2>
+              <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>
+                {requests.length} request{requests.length!==1?"s":""}{pendingCount>0?` · ${pendingCount} pending`:""}</p>
+            </div>
+            {requests.length===0?(
+              <div style={{textAlign:"center",padding:"3rem 1rem",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16}}>
+                <Icon name="mail-off" size={36} style={{color:BRAND_DIM,display:"block",margin:"0 auto 12px"}}/>
+                <p style={{fontWeight:700,fontSize:15,margin:"0 0 6px"}}>No contact requests yet</p>
+                <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>Share your profile to get discovered by employers</p>
+              </div>
+            ):(
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {requests.map(r=>(
+                  <div key={r.id} onClick={()=>setSelReq(r)} style={{background:"var(--color-background-primary)",border:`1px solid ${r.status==="pending"?BRAND+"44":"var(--color-border-tertiary)"}`,borderRadius:14,padding:"1rem 1.25rem",cursor:"pointer",display:"flex",alignItems:"center",gap:14,boxShadow:r.status==="pending"?"0 2px 10px "+BRAND+"14":"none"}}>
+                    <div style={{width:44,height:44,borderRadius:10,background:r.status==="pending"?BRAND_LIGHT:"var(--color-background-secondary)",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,border:r.status==="pending"?`1px solid ${BRAND}22`:"0.5px solid var(--color-border-tertiary)"}}>
+                      <Icon name="building" size={20} style={{color:r.status==="pending"?BRAND:"var(--color-text-secondary)"}}/>
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                        <p style={{fontWeight:800,fontSize:15,margin:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.company}</p>
+                        {r.status==="pending"&&<span style={{width:7,height:7,borderRadius:"50%",background:"#FF6B6B",flexShrink:0}}/>}
+                      </div>
+                      <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"0 0 2px"}}>{r.title}</p>
+                      <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:0}}>{fmt(r.createdAt)}{r.salary?` · ${r.salary}`:""}</p>
+                    </div>
+                    <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,flexShrink:0}}>
+                      <Badge color={r.status==="pending"?"amber":r.status==="accepted"?"green":"red"}>
+                        {r.status==="pending"?"Awaiting reply":r.status==="accepted"?"Accepted":"Declined"}
+                      </Badge>
+                      <Icon name="chevron-right" size={14} style={{color:"var(--color-text-secondary)"}}/>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── TALENT POOL ───────────────────────────────────────────────────────────────
+function PublicPage({onRequest,session,company}){
+  const [candidates,setCandidates]=useState([]);
+  const [filter,setFilter]=useState({location:"",industry:"",years:"",field:""});
+  const [selected,setSelected]=useState(null);
+  const [showContactForm,setShowContactForm]=useState(false);
+  const [reqForm,setReqForm]=useState({company:company?.name||"",contactName:"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});
+  const [reqErrors,setReqErrors]=useState({});
+  const [reqSent,setReqSent]=useState(false);
+  const rfset=(k,v)=>setReqForm(f=>({...f,[k]:v}));
+
+  useEffect(()=>{ld(SK.CANDIDATES,true).then(d=>setCandidates((d||[]).filter(c=>c.consentPool&&c.shareActive)));},[]);
+
+  const filtered=candidates.filter(c=>
+    (!filter.location||c.locations?.includes(filter.location))&&
+    (!filter.industry||(c.industries||[]).includes(filter.industry))&&
+    (!filter.years||c.years===filter.years)&&
+    (!filter.field||c.field===filter.field)
+  );
+
+  const openCandidate=(c)=>{
+    setSelected(c);setShowContactForm(false);
+    setReqSent(false);setReqForm({company:company?.name||"",contactName:"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});setReqErrors({});
+  };
+
+  const sendRequest=async()=>{
+    const e={};
+    if(!reqForm.company.trim())e.company="Required";
+    if(!reqForm.contactName.trim())e.contactName="Required";
+    if(!reqForm.contactEmail.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/))e.contactEmail="Invalid email";
+    if(!reqForm.title.trim())e.title="Required";
+    if(!reqForm.jd.trim())e.jd="Required";
+    if(Object.keys(e).length){setReqErrors(e);return;}
+    const req={id:gid(),candidateCode:selected.code,employerEmail:session?.email||null,companyCode:session?.code||null,...reqForm,createdAt:new Date().toISOString(),status:"pending"};
+    const existing=(await ld(SK.REQUESTS,true))||[];
+    await sd(SK.REQUESTS,[...existing,req],true);
+    const notifs=(await ld(SK.NOTIFS,true))||[];
+    notifs.push({id:gid(),type:"contact_request",to:selected.code,company:reqForm.company,title:reqForm.title,message:`${reqForm.company} has sent you a contact request for the role of ${reqForm.title}`,detail:req,createdAt:new Date().toISOString(),read:false});
+    await sd(SK.NOTIFS,notifs,true);
+    if(selected.email){
+      sendAutomationEmail(
+        selected.email,
+        `${reqForm.company} wants to connect with you about ${reqForm.title}`,
+        `Hi ${selected.name||"there"},\n\n${reqForm.company} found your profile in the pairup Talent Pool and would like to connect with you about the ${reqForm.title} role.\n\n${reqForm.jd}\n\n${reqForm.salary?`Salary range: ${reqForm.salary}\n`:""}${reqForm.benefits?`Benefits: ${reqForm.benefits}\n`:""}\nContact: ${reqForm.contactName} (${reqForm.contactEmail}${reqForm.contactPhone?`, ${reqForm.contactPhone}`:""})\n\nLog in to pairup to review and respond to this request.\n\nBest regards,\n${reqForm.company}`
+      );
+    }
+    setReqSent(true);onRequest();
+  };
+
+  // Filter bar helper - now handled by FilterPills component
+
+  const TABLE_COLS=["Code","Position","Field","Industry","Location","Experience","Languages","Skills","Salary","Summary",""];
+
+  return(
+    <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
+      <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Talent Pool</h1>
+      <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>Browse candidates who are open to new opportunities</p>
+
+      {/* Filters */}
+      <Card style={{marginBottom:"1.5rem"}}>
+        <SH icon="filter" title="Filters"/>
+        <FilterPills title="Location" options={LOCATIONS} value={filter.location} onChange={v=>setFilter(f=>({...f,location:v}))} inline={4}/>
+        <FilterPills title="Field" options={FIELDS} value={filter.field} onChange={v=>setFilter(f=>({...f,field:v}))} inline={6}/>
+        <FilterPills title="Industry" options={INDUSTRIES} value={filter.industry} onChange={v=>setFilter(f=>({...f,industry:v}))} inline={5}/>
+        <FilterPills title="Experience" options={YEARS_OPTS} value={filter.years} onChange={v=>setFilter(f=>({...f,years:v}))} inline={6}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+          <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}><strong>{filtered.length}</strong> candidate{filtered.length!==1?"s":""} found</p>
+          <button onClick={()=>setFilter({location:"",industry:"",years:"",field:""})} style={{background:"none",border:"none",cursor:"pointer",fontSize:12,color:BRAND,fontFamily:FONT,fontWeight:600}}>Clear all filters</button>
+        </div>
+      </Card>
+
+      {/* Table */}
+      <div style={{overflowX:"auto",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13,fontFamily:FONT,minWidth:900}}>
+          <thead>
+            <tr style={{background:BRAND}}>
+              {TABLE_COLS.map(h=><th key={h} style={{textAlign:"left",padding:"11px 14px",fontWeight:700,fontSize:11,color:"rgba(255,255,255,0.9)",whiteSpace:"nowrap",textTransform:"uppercase",letterSpacing:0.6}}>{h}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((c,i)=>(
+              <tr key={c.code} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"var(--color-background-primary)":"var(--color-background-secondary)",transition:"background 0.1s"}} onMouseEnter={e=>e.currentTarget.style.background=BRAND_LIGHT} onMouseLeave={e=>e.currentTarget.style.background=i%2===0?"var(--color-background-primary)":"var(--color-background-secondary)"}>
+                <td style={{padding:"12px 14px",fontFamily:"monospace",fontWeight:700,fontSize:12,color:BRAND,whiteSpace:"nowrap"}}>{c.code}</td>
+                <td style={{padding:"12px 14px",fontWeight:600,minWidth:140}}>{c.position}</td>
+                <td style={{padding:"12px 14px",minWidth:100}}>{c.field&&<Badge color="purple">{c.field}</Badge>}</td>
+                <td style={{padding:"12px 14px",minWidth:130,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"var(--color-text-secondary)"}}>{(c.industries||[]).join(", ")}</td>
+                <td style={{padding:"12px 14px",whiteSpace:"nowrap"}}><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{(c.locations||[]).map(l=><Badge key={l} color="blue">{l}</Badge>)}</div></td>
+                <td style={{padding:"12px 14px",whiteSpace:"nowrap",color:"var(--color-text-secondary)"}}>{c.years}</td>
+                <td style={{padding:"12px 14px",minWidth:120}}><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{(c.languages||[]).map(l=><span key={l.lang} style={{background:BRAND_LIGHT,color:BRAND,fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:99,whiteSpace:"nowrap"}}>{l.lang}{l.level?` · ${l.level}`:""}</span>)}</div></td>
+                <td style={{padding:"12px 14px",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"var(--color-text-secondary)"}}>{c.skills}</td>
+                <td style={{padding:"12px 14px",whiteSpace:"nowrap",color:BRAND,fontWeight:600}}>{c.salary||"—"}</td>
+                <td style={{padding:"12px 14px",maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"var(--color-text-secondary)",fontSize:12}}>{c.intro||"—"}</td>
+                <td style={{padding:"12px 14px",whiteSpace:"nowrap"}}>
+                  <Btn onClick={()=>openCandidate(c)} style={{fontSize:11,padding:"5px 12px"}}>View</Btn>
+                </td>
+              </tr>
+            ))}
+            {filtered.length===0&&<tr><td colSpan={TABLE_COLS.length} style={{padding:"3rem",textAlign:"center",color:"var(--color-text-secondary)"}}>No candidates match your filters</td></tr>}
+          </tbody>
+        </table>
+      </div>
+
+      {/* CANDIDATE DETAIL MODAL */}
+      {selected&&!showContactForm&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:"1rem"}}>
+          {
+            <div style={{background:"#ffffff",borderRadius:20,width:"100%",maxWidth:600,maxHeight:"90vh",overflow:"auto",padding:"2rem",fontFamily:FONT,boxShadow:"0 24px 60px rgba(0,44,118,0.18)"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"1.5rem"}}>
+                <div>
+                  <span style={{fontFamily:"monospace",fontWeight:700,background:BRAND_LIGHT,color:BRAND,padding:"3px 10px",borderRadius:6,fontSize:12}}>{selected.code}</span>
+                  <h2 style={{fontSize:21,fontWeight:800,margin:"8px 0 4px",color:BRAND}}>{selected.position}</h2>
+                  <p style={{color:"var(--color-text-secondary)",fontSize:13,margin:0,display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+                    {selected.field&&<Badge color="purple">{selected.field}</Badge>}
+                    <span>{(selected.industries||[]).join(", ")}</span>
+                    <span>·</span><span>{selected.years}</span>
+                  </p>
+                </div>
+                <button onClick={()=>setSelected(null)} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",fontSize:16,color:BRAND,width:32,height:32,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,flexShrink:0}}>✕</button>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px 24px",marginBottom:"1rem"}}>
+                <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 5px"}}>Location</p><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{(selected.locations||[]).map(l=><Badge key={l} color="blue">{l}</Badge>)}</div></div>
+                <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 3px"}}>Salary Expectation</p><p style={{fontSize:13,fontWeight:700,color:BRAND,margin:0}}>{selected.salary||"—"}</p></div>
+                <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 5px"}}>Languages</p><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{(selected.languages||[]).map(l=><span key={l.lang} style={{background:BRAND_LIGHT,color:BRAND,fontSize:11,fontWeight:600,padding:"3px 9px",borderRadius:99}}>{l.lang} · {l.level}</span>)}</div></div>
+                <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 3px"}}>Available</p><p style={{fontSize:13,margin:0}}>{selected.onboard||"—"}</p></div>
+              </div>
+              <div style={{marginBottom:"0.875rem"}}><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 4px"}}>Key Skills</p><p style={{fontSize:14,margin:0}}>{selected.skills}</p></div>
+              {selected.intro&&<div style={{marginBottom:"1rem"}}><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 4px"}}>Professional Summary</p><p style={{fontSize:14,lineHeight:1.7,margin:0}}>{selected.intro}</p></div>}
+              <div style={{background:BRAND_LIGHT,borderRadius:10,padding:"0.875rem 1rem",marginBottom:"1.5rem",display:"flex",alignItems:"center",gap:10,border:`1px solid ${BRAND}22`}}>
+                <Icon name="lock" size={16} style={{color:BRAND}}/>
+                <span style={{fontSize:12,color:BRAND,fontWeight:600}}>Portfolio and CV links are private and will only be shared after the candidate accepts your request.</span>
+              </div>
+              <Btn onClick={()=>setShowContactForm(true)} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"12px"}}><Icon name="send" size={14}/>Contact Request</Btn>
+            </div>
+          }
+        </div>
+      )}
+
+      {/* CONTACT FORM MODAL */}
+      {showContactForm&&selected&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",display:"flex",alignItems:"flex-start",justifyContent:"center",zIndex:300,padding:"2rem 1rem",overflowY:"auto"}}>
+          <div style={{background:"#ffffff",borderRadius:20,width:"100%",maxWidth:580,padding:"2rem",fontFamily:FONT,boxShadow:"0 24px 60px rgba(0,44,118,0.18)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1.5rem"}}>
+              <div>
+                <h2 style={{fontSize:18,fontWeight:800,margin:"0 0 4px",color:BRAND}}>Send Contact Request</h2>
+                <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}>To candidate: <strong style={{fontFamily:"monospace",color:BRAND}}>{selected.code}</strong></p>
+              </div>
+              <button onClick={()=>{setShowContactForm(false);setSelected(null);}} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",fontSize:16,color:BRAND,width:32,height:32,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,flexShrink:0}}>✕</button>
+            </div>
+            {reqSent?(
+              <div style={{textAlign:"center",padding:"2rem",background:BRAND_LIGHT,borderRadius:14}}>
+                <Icon name="check-circle" size={36} style={{color:BRAND}}/>
+                <p style={{fontWeight:800,marginTop:8,fontSize:16,color:BRAND}}>Request sent!</p>
+                <p style={{fontSize:13,color:"var(--color-text-secondary)"}}>The candidate will be notified and will respond to your request.</p>
+                <Btn onClick={()=>{setShowContactForm(false);setSelected(null);}} style={{marginTop:12}}>Close</Btn>
+              </div>
+            ):(
+              <>
+                <p style={{fontSize:11,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"0 0 1rem"}}>Company Information</p>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
+                  <F label="Company name" error={reqErrors.company} required><input style={inp} value={reqForm.company} onChange={e=>rfset("company",e.target.value)}/></F>
+                  <F label="Contact person" error={reqErrors.contactName} required><input style={inp} value={reqForm.contactName} onChange={e=>rfset("contactName",e.target.value)}/></F>
+                  <F label="Contact email" error={reqErrors.contactEmail} required><input style={inp} type="email" value={reqForm.contactEmail} onChange={e=>rfset("contactEmail",e.target.value)}/></F>
+                  <F label="Contact phone"><input style={inp} value={reqForm.contactPhone} onChange={e=>rfset("contactPhone",e.target.value)}/></F>
+                </div>
+                <p style={{fontSize:11,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"1rem 0"}}>Role Details</p>
+                <F label="Job title" error={reqErrors.title} required><input style={inp} value={reqForm.title} onChange={e=>rfset("title",e.target.value)} placeholder="e.g. Senior Frontend Developer"/></F>
+                <F label="Job description" error={reqErrors.jd} required><textarea rows={4} style={{...inp,resize:"vertical"}} value={reqForm.jd} onChange={e=>rfset("jd",e.target.value)} placeholder="Describe the role, responsibilities, and team…"/></F>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
+                  <F label="Offered salary"><input style={inp} value={reqForm.salary} onChange={e=>rfset("salary",e.target.value)} placeholder="e.g. 30–40M VND/month"/></F>
+                  <F label="Additional benefits"><input style={inp} value={reqForm.benefits} onChange={e=>rfset("benefits",e.target.value)} placeholder="e.g. insurance, remote, equity"/></F>
+                </div>
+                <Btn onClick={sendRequest} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"13px",marginTop:4}}>Send Request →</Btn>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── POST JOB PAGE (full page, not modal) ─────────────────────────────────────
+const BENEFITS_KEY="pairup_saved_benefits";
+const RECRUITMENT_ROUNDS=["Applied","Screening","Test","Interview","Offer","Onboard","Rejected","Pipeline"];
+const STAGE_DESCRIPTIONS={Applied:"Application received",Screening:"Initial qualification and screening",Test:"Skills or take-home assessment",Interview:"Hiring team interview",Offer:"Offer stage",Onboard:"New hire onboarding",Rejected:"Candidate not moving forward",Pipeline:"Saved for future consideration"};
+const ROUND_REASONS=["Over qualified","Under qualified","Lack of experience","Salary","Culture","Motivation","Career Path","Others"];
+const DEFAULT_RECRUITMENT_PROCESS=RECRUITMENT_ROUNDS.map((name)=>({name,enabled:true,description:STAGE_DESCRIPTIONS[name]||""}));
+const DEFAULT_EMAIL_SETTINGS={};
+
+function PostJobPage({onBack,onSuccess,company,session}){
+  const [form,setForm]=useState({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:[],industries:[],field:"",contact:"",deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x})),emailSettings:{...DEFAULT_EMAIL_SETTINGS}});
+  const [errors,setErrors]=useState({});
+  const [done,setDone]=useState(null);
+  const [benefitsSaved,setBenefitsSaved]=useState(false);
+  const [applyBenefitsToAll,setApplyBenefitsToAll]=useState(false);
+  const s=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const tl=(l)=>setForm(f=>({...f,locations:f.locations.includes(l)?f.locations.filter(x=>x!==l):[...f.locations,l]}));
+  const ti=(i)=>setForm(f=>({...f,industries:f.industries.includes(i)?f.industries.filter(x=>x!==i):[...f.industries,i]}));
+
+  useEffect(()=>{
+    // Load saved benefits if any
+    ld(BENEFITS_KEY).then(b=>{if(b){setForm(f=>({...f,benefits:b}));setBenefitsSaved(true);}});
+  },[]);
+
+  const useSameBenefits=async()=>{
+    const saved=await ld(BENEFITS_KEY);
+    if(saved){setForm(f=>({...f,benefits:saved}));setBenefitsSaved(true);}
+  };
+
+  const saveBenefits=async()=>{
+    await sd(BENEFITS_KEY,form.benefits);setBenefitsSaved(true);
+  };
+
+  const submit=async()=>{
+    const e={};
+    if(!form.title.trim())e.title="Required";
+    if(!form.company.trim())e.company="Required";
+    if(!form.summary.trim())e.summary="Required";
+    if(!form.description.trim())e.description="Required";
+    if(!form.requirements.trim())e.requirements="Required";
+
+    if(form.locations.length===0)e.locations="Select at least one";
+    if(form.industries.length===0)e.industries="Select at least one";
+    if(!form.contact.trim())e.contact="Required";
+    if(Object.keys(e).length){setErrors(e);return;}
+    const code=gjid();
+    const job={...form,code,companyCode:session?.code||null,companyEmail:session?.email||null,createdAt:new Date().toISOString(),status:"active",recruitmentProcess:form.recruitmentProcess?.length?form.recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x})),emailSettings:form.emailSettings||{...DEFAULT_EMAIL_SETTINGS}};
+    const ex=(await ld(SK.JOBS,true))||[];
+    if(applyBenefitsToAll && form.benefits.trim()) await sd(BENEFITS_KEY,form.benefits);
+    const jobsToSave=applyBenefitsToAll && form.benefits.trim()
+      ? ex.map(existing=>existing.companyCode===session?.code?{...existing,benefits:form.benefits}:existing)
+      : ex;
+    await sd(SK.JOBS,[...jobsToSave,job],true);
+    // Push notification
+    const notifs=(await ld(SK.NOTIFS,true))||[];
+    notifs.push({id:gid(),type:"job_posted",to:session?.email||"employer",message:`Job posted: ${form.title} at ${form.company}`,jobCode:code,company:form.company,title:form.title,createdAt:new Date().toISOString(),read:false});
+    await sd(SK.NOTIFS,notifs,true);
+    setDone(code);onSuccess();
+  };
+
+  if(done)return(
+    <div style={{maxWidth:520,margin:"4rem auto",textAlign:"center",padding:"0 1rem",fontFamily:FONT}}>
+      <div style={{width:72,height:72,borderRadius:"50%",background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 1.5rem"}}><Icon name="check" size={34} style={{color:BRAND}}/></div>
+      <h2 style={{fontWeight:800,fontSize:24,margin:"0 0 0.5rem",color:BRAND}}>Job posted!</h2>
+      <p style={{color:"var(--color-text-secondary)",marginBottom:"2rem",lineHeight:1.6,fontSize:14}}>Your listing is now live on pairup.</p>
+      <div style={{background:BRAND_LIGHT,borderRadius:16,padding:"1.5rem 2rem",marginBottom:"1.5rem",border:`1.5px solid ${BRAND}22`}}>
+        <p style={{fontSize:11,color:BRAND,fontWeight:700,marginBottom:8,textTransform:"uppercase",letterSpacing:1.5}}>Job ID</p>
+        <p style={{fontFamily:"monospace",fontSize:36,fontWeight:800,color:BRAND,margin:0,letterSpacing:4}}>{done}</p>
+      </div>
+      <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+        <Btn variant="outline" onClick={()=>{setDone(null);setForm({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:[],industries:[],field:"",contact:"",deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x})),emailSettings:{...DEFAULT_EMAIL_SETTINGS}});setErrors({});}}>Post another job</Btn>
+        <Btn onClick={onBack}>Back to dashboard</Btn>
+      </div>
+    </div>
+  );
+
+  return(
+    <div style={{maxWidth:700,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
+      <button onClick={onBack} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:13,fontWeight:600,fontFamily:FONT,marginBottom:"1.5rem",display:"flex",alignItems:"center",gap:6}}><Icon name="arrow-left" size={14}/>Back to dashboard</button>
+      <div style={{marginBottom:"2rem"}}>
+        <h1 style={{fontSize:26,fontWeight:800,margin:"0 0 6px",color:BRAND}}>Post a job</h1>
+        <p style={{color:"var(--color-text-secondary)",fontSize:13,margin:0}}>All fields are required</p>
+      </div>
+
+      <Card>
+        <SH icon="briefcase" title="Role Details"/>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
+          <F label="Job title" error={errors.title} required><input style={inp} value={form.title} onChange={e=>s("title",e.target.value)} placeholder="e.g. Senior Frontend Developer"/></F>
+          <F label="Company name" error={errors.company} required hint="Locked to your registered company"><input style={{...inp,background:"var(--color-background-secondary)",cursor:"not-allowed"}} value={form.company} disabled/></F>
+          <F label="Offered salary" error={errors.salary}><input style={inp} value={form.salary} onChange={e=>s("salary",e.target.value)} placeholder="e.g. 25–35M VND/month"/></F>
+          <F label="Field"><select style={inp} value={form.field} onChange={e=>s("field",e.target.value)}><option value="">-- Select --</option>{FIELDS.map(f=><option key={f}>{f}</option>)}</select></F>
+          <F label="Contact & email" error={errors.contact} required><input style={inp} value={form.contact} onChange={e=>s("contact",e.target.value)} placeholder="HR Manager — hr@company.com"/></F>
+          <F label="Application deadline"><input style={inp} type="date" value={form.deadline} onChange={e=>s("deadline",e.target.value)}/></F>
+        </div>
+        <F label="Location(s)" error={errors.locations} required>
+          <PillSel options={LOCATIONS} selected={form.locations} onToggle={tl} error={errors.locations}/>
+        </F>
+        <F label="Industry (select all that apply)" error={errors.industries} required>
+          <IndustryPicker selected={form.industries} onToggle={ti} error={errors.industries}/>
+        </F>
+      </Card>
+
+      <Card>
+        <SH icon="file-description" title="Job Description"/>
+        <F label="Job Summary" error={errors.summary} required hint="A 2–3 sentence overview of the role and its purpose">
+          <RichTextEditor value={form.summary} onChange={v=>s("summary",v)} minHeight={70}/>
+        </F>
+        <F label="Description" error={errors.description} required hint="Detailed day-to-day responsibilities and team context">
+          <RichTextEditor value={form.description} onChange={v=>s("description",v)} minHeight={110}/>
+        </F>
+        <F label="Requirements" error={errors.requirements} required hint="Must-have skills, experience, and qualifications">
+          <RichTextEditor value={form.requirements} onChange={v=>s("requirements",v)} minHeight={90}/>
+        </F>
+        <F label="Benefits" error={errors.benefits} hint="Optional. You can save this and reuse it for future jobs.">
+          <div style={{marginBottom:8,display:"flex",gap:8,alignItems:"center"}}>
+            {benefitsSaved&&(
+              <button type="button" onClick={useSameBenefits} style={{display:"flex",alignItems:"center",gap:5,padding:"5px 12px",borderRadius:8,border:`1.5px solid ${BRAND}`,background:BRAND_LIGHT,color:BRAND,cursor:"pointer",fontSize:11,fontWeight:700,fontFamily:FONT,whiteSpace:"nowrap"}}>
+                <Icon name="copy" size={12}/>Use same as before
+              </button>
+            )}
+            {form.benefits.trim()&&(
+              <button type="button" onClick={saveBenefits} style={{display:"flex",alignItems:"center",gap:5,padding:"5px 12px",borderRadius:8,border:"0.5px solid var(--color-border-secondary)",background:"none",color:"var(--color-text-secondary)",cursor:"pointer",fontSize:11,fontWeight:600,fontFamily:FONT,whiteSpace:"nowrap"}}>
+                <Icon name="device-floppy" size={12}/>Save for future use
+              </button>
+            )}
+          </div>
+          <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"var(--color-text-primary)",cursor:"pointer",marginBottom:8}}>
+            <input type="checkbox" checked={applyBenefitsToAll} onChange={e=>setApplyBenefitsToAll(e.target.checked)} style={{width:16,height:16,accentColor:BRAND}}/>
+            <span><strong>Apply these benefits to all other jobs</strong> (existing and future jobs)</span>
+          </label>
+          <RichTextEditor value={form.benefits} onChange={v=>{s("benefits",v);setBenefitsSaved(false);}} minHeight={80}/>
+        </F>
+      </Card>
+
+      <Card><SH icon="git-merge" title="Recruitment Process"/><p style={{fontSize:13,color:"var(--color-text-secondary)",marginTop:0}}>Customize the process for this role. You can edit it later from the job detail page.</p>{form.recruitmentProcess.map((r,i)=><div key={r.name} style={{display:"grid",gridTemplateColumns:"160px 1fr",gap:10,alignItems:"start",padding:"10px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}><div style={{fontWeight:800,color:BRAND,paddingTop:8}}>{r.name}</div><textarea style={{...inp,minHeight:55}} value={r.description||""} onChange={e=>setForm(f=>({...f,recruitmentProcess:f.recruitmentProcess.map((x,idx)=>idx===i?{...x,description:e.target.value}:x)}))}/></div>)}</Card>
+
+      <Btn onClick={submit} style={{width:"100%",justifyContent:"center",fontSize:15,padding:"14px"}}>Post job →</Btn>
+    </div>
+  );
+}
+
+// ── JOBS ───────────────────────────────────────────────────────────────────────
+function JobsPage({onApply,session}){
+  const [jobs,setJobs]=useState([]);
+  const [companies,setCompanies]=useState([]);
+  const [filter,setFilter]=useState({location:"",industry:"",years:"",field:""});
+  const [selected,setSelected]=useState(null);
+  const [form,setForm]=useState({name:"",email:"",phone:"",cvLink:"",portfolio:"",salary:"",onboard:"",consent:false});
+  const [errors,setErrors]=useState({});
+  const [submitted,setSubmitted]=useState(false);
+  const [alreadyApplied,setAlreadyApplied]=useState(false);
+  const [appliedCodes,setAppliedCodes]=useState(new Set());
+  const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
+
+  const load=async()=>{
+    const d=(await ld(SK.JOBS,true))||[];
+    setJobs(d.filter(j=>j.status==="active"));
+    setCompanies((await ld(SK.COMPANIES,true))||[]);
+  };
+  useEffect(()=>{
+    load();
+    (async()=>{
+      const profile=await ld("pairup_my_profile_"+session.email);
+      const apps=(await ld(SK.APPLICATIONS,true))||[];
+      setAppliedCodes(new Set(apps.filter(a=>a.candidateCode===session.code||(profile?.email&&a.email===profile.email)).map(a=>a.jobCode)));
+    })();
+    const iv=setInterval(load,10000); // keep the list fresh as employers post/reactivate jobs
+    return ()=>clearInterval(iv);
+  },[]);
+
+  const filtered=jobs.filter(j=>
+    (!filter.location||(j.locations||[]).includes(filter.location))&&
+    (!filter.industry||(j.industries||[]).includes(filter.industry))&&
+    (!filter.years||j.years===filter.years)&&
+    (!filter.field||j.field===filter.field)
+  );
+
+  const openJob=async(j)=>{
+    setSelected(j);setSubmitted(false);setErrors({});
+    const profile=await ld("pairup_my_profile_"+session.email);
+    const applications=(await ld(SK.APPLICATIONS,true))||[];
+    const existing=applications.find(a=>a.jobCode===j.code && (a.candidateCode===session.code||(profile?.email&&a.email===profile.email)));
+    setAlreadyApplied(!!existing);
+    setForm({
+      name:profile?.name||"",email:profile?.email||session.email,phone:profile?.phone||"",
+      cvLink:profile?.cvLink||"",portfolio:profile?.portfolio||"",salary:profile?.salary||"",
+      onboard:profile?.onboard||"",consent:false
+    });
+  };
+
+  const apply=async()=>{
+    if(alreadyApplied)return;
+    const e={};
+    if(!form.name.trim())e.name="Required";
+    if(!form.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/))e.email="Invalid email";
+    if(!form.phone.trim())e.phone="Required";
+    if(!form.cvLink.trim())e.cvLink="Required";
+    if(!form.salary.trim())e.salary="Required";
+    if(!form.onboard)e.onboard="Required";
+    if(!form.consent)e.consent="You must agree before applying";
+    if(Object.keys(e).length){setErrors(e);return;}
+    const profile=await ld("pairup_my_profile_"+session.email);
+    const existing=(await ld(SK.APPLICATIONS,true))||[];
+    const duplicate=existing.find(a=>a.jobCode===selected.code && (a.candidateCode===session.code||(a.email===form.email)));
+    if(duplicate){setAlreadyApplied(true);setAppliedCodes(prev=>new Set([...prev,selected.code]));return;}
+    const application={id:gid(),jobCode:selected.code,jobTitle:selected.title,company:selected.company,companyEmail:selected.companyEmail||null,candidateCode:session.code,profileSnapshot:profile||null,...form,createdAt:new Date().toISOString(),status:"applied",profileEvents:[]};
+    await sd(SK.APPLICATIONS,[...existing,application],true);
+    const notifs=(await ld(SK.NOTIFS,true))||[];
+    notifs.push({id:gid(),type:"application",to:selected.companyEmail||"employer",message:`New application for ${selected.title} at ${selected.company}`,title:selected.title,company:selected.company,applicationId:application.id,candidateCode:application.candidateCode,createdAt:new Date().toISOString(),read:false});
+    await sd(SK.NOTIFS,notifs,true);
+    setAlreadyApplied(true);setAppliedCodes(prev=>new Set([...prev,selected.code]));setSubmitted(true);onApply();
+    pushToSheet("Applied",application);
+  };
+
+  return(
+    <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
+      <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Jobs</h1>
+      <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>Browse all active jobs posted on pairup.</p>
+      <Card style={{marginBottom:"1.5rem"}}>
+        <SH icon="filter" title="Filters"/>
+        <FilterPills title="Location" options={LOCATIONS} value={filter.location} onChange={v=>setFilter(f=>({...f,location:v}))} inline={4}/>
+        <FilterPills title="Field" options={FIELDS} value={filter.field} onChange={v=>setFilter(f=>({...f,field:v}))} inline={6}/>
+        <FilterPills title="Industry" options={INDUSTRIES} value={filter.industry} onChange={v=>setFilter(f=>({...f,industry:v}))} inline={5}/>
+        <FilterPills title="Experience" options={YEARS_OPTS} value={filter.years} onChange={v=>setFilter(f=>({...f,years:v}))} inline={6}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+          <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}><strong>{filtered.length}</strong> job{filtered.length!==1?"s":""} found</p>
+          <button onClick={()=>setFilter({location:"",industry:"",years:"",field:""})} style={{background:"none",border:"none",cursor:"pointer",fontSize:12,color:BRAND,fontFamily:FONT,fontWeight:600}}>Clear all filters</button>
+        </div>
+      </Card>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {filtered.map(j=>(
+          <button key={j.code} onClick={()=>openJob(j)} style={{textAlign:"left",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:14,padding:"1.25rem",cursor:"pointer",fontFamily:FONT}}>
+            <div style={{display:"flex",justifyContent:"space-between",gap:16,alignItems:"flex-start"}}>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:5}}><Badge color="blue">{j.field||"Job"}</Badge><span style={{fontFamily:"monospace",fontSize:11,color:BRAND_DIM}}>{j.code}</span></div>
+                <h2 style={{fontSize:18,fontWeight:800,color:BRAND,margin:"0 0 5px"}}>{j.title}</h2>
+                <p style={{fontSize:13,fontWeight:600,margin:"0 0 8px"}}>{j.company}</p>
+                <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}>{(j.locations||[]).join(" · ")} · {(j.industries||[]).join(", ")}{j.salary?` · ${j.salary}`:""}</p>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                {appliedCodes.has(j.code)&&<Badge color="green">Applied</Badge>}
+                <Icon name="chevron-right" size={18} style={{color:BRAND_DIM,marginTop:5}}/>
+              </div>
+            </div>
+          </button>
+        ))}
+        {filtered.length===0&&<div style={{textAlign:"center",padding:"3rem",color:"var(--color-text-secondary)",background:"var(--color-background-primary)",borderRadius:16}}>No jobs match your filters.</div>}
+      </div>
+
+      {selected&&<div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",display:"flex",alignItems:"flex-start",justifyContent:"center",zIndex:300,padding:"2rem 1rem",overflowY:"auto"}}>
+        <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:1000,padding:"2rem",fontFamily:FONT}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"1.5rem"}}>
+            <div><Badge color="blue">{selected.field||"Job"}</Badge><h2 style={{fontSize:24,fontWeight:800,color:BRAND,margin:"8px 0 4px"}}>{selected.title}</h2><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{selected.company} · {(selected.locations||[]).join(", ")}</p></div>
+            <button onClick={()=>setSelected(null)} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",fontSize:16,color:BRAND,width:32,height:32,borderRadius:"50%"}}>✕</button>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 280px",gap:"1.5rem",alignItems:"start"}}>
+            <div>
+              <Card><h3 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"0 0 10px"}}>Job Description</h3><p style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.summary||""}}/><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.description||""}}/><h4 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"1rem 0 8px"}}>Requirements</h4><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.requirements||""}}/>{selected.benefits&&<><h4 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"1rem 0 8px"}}>Benefits</h4><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:0}} dangerouslySetInnerHTML={{__html:selected.benefits||""}}/></>}</Card>
+              {alreadyApplied||submitted?<div style={{textAlign:"center",background:BRAND_LIGHT,borderRadius:14,padding:"2rem"}}><Icon name="check-circle" size={36} style={{color:BRAND}}/><h3 style={{color:BRAND,margin:"8px 0"}}>{submitted?"Application submitted!":"Applied"}</h3><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{submitted?`You've successfully applied for ${selected.title}. You can track its status under "Applied Jobs".`:"You have already applied for this position."}</p></div>:(<>
+                <Card><SH icon="user-circle" title="Apply for this position"/><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}><F label="Full name" error={errors.name} required><input style={inp} value={form.name} onChange={e=>sf("name",e.target.value)}/></F><F label="Email" error={errors.email} required><input style={inp} type="email" value={form.email} onChange={e=>sf("email",e.target.value)}/></F><F label="Phone number" error={errors.phone} required><input style={inp} value={form.phone} onChange={e=>sf("phone",e.target.value)}/></F><F label="CV link" error={errors.cvLink} required><input style={inp} type="url" value={form.cvLink} onChange={e=>sf("cvLink",e.target.value)} placeholder="https://..."/></F><F label="Portfolio link"><input style={inp} type="url" value={form.portfolio} onChange={e=>sf("portfolio",e.target.value)} placeholder="https://..."/></F><F label="Salary expected" error={errors.salary} required><input style={inp} value={form.salary} onChange={e=>sf("salary",e.target.value)} placeholder="e.g. 35M VND/month"/></F><F label="Available to start" error={errors.onboard} required><select style={inp} value={form.onboard} onChange={e=>sf("onboard",e.target.value)}><option value="">-- Select --</option>{ONBOARD_OPTS.map(o=><option key={o}>{o}</option>)}</select></F></div></Card>
+                <label style={{display:"flex",alignItems:"flex-start",gap:10,padding:"1rem",background:"#F8F9FB",borderRadius:10,border:`1px solid ${form.consent?BRAND:"var(--color-border-tertiary)"}`,cursor:"pointer",marginBottom:"1rem"}}><input type="checkbox" checked={form.consent} onChange={e=>sf("consent",e.target.checked)} style={{marginTop:3,accentColor:BRAND,width:16,height:16,flexShrink:0}}/><span style={{fontSize:12,color:"var(--color-text-primary)",lineHeight:1.6}}>I agree that my personal information and application details may be stored and processed for this job application. This consent is required to apply.</span></label>{errors.consent&&<p style={{fontSize:11,color:"#E24B4A",margin:"-6px 0 10px"}}>{errors.consent}</p>}
+                <Btn onClick={apply} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"13px"}}>Apply →</Btn>
+              </>)}
+            </div>
+            <div>
+              {(()=>{const jc=companies.find(c=>c.code===selected.companyCode);return(
+                <Card style={{position:"sticky",top:16}}>
+                  <SH icon="building" title="About the company"/>
+                  <h4 style={{fontSize:15,fontWeight:800,color:BRAND,margin:"0 0 6px"}}>{selected.company}</h4>
+                  {jc?(<>
+                    <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:"0 0 10px"}}>{jc.industry}{jc.teamSize?` · ${jc.teamSize} employees`:""}</p>
+                    {jc.address&&<p style={{fontSize:12,margin:"0 0 8px",display:"flex",gap:6}}><Icon name="map-pin" size={13} style={{color:BRAND_DIM,flexShrink:0,marginTop:2}}/>{jc.address}</p>}
+                    {jc.website&&<p style={{fontSize:12,margin:"0 0 10px",display:"flex",gap:6}}><Icon name="world" size={13} style={{color:BRAND_DIM,flexShrink:0,marginTop:2}}/><a href={jc.website} target="_blank" rel="noreferrer" style={{color:BRAND}}>{jc.website}</a></p>}
+                    {jc.intro&&<p style={{fontSize:13,lineHeight:1.7,margin:0,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)"}}>{jc.intro}</p>}
+                  </>):(
+                    <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0,fontStyle:"italic"}}>No additional company information provided.</p>
+                  )}
+                </Card>
+              );})()}
+            </div>
+          </div>
+        </div>
+      </div>}
+    </div>
+  );
+}
+
+// ── EMPLOYER ──────────────────────────────────────────────────────────────────
+function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
+  const [postingJob,setPostingJob]=useState(false);
+  const [jobsAll,setJobsAll]=useState([]);
+  const [requestsAll,setRequestsAll]=useState([]);
+  const [applications,setApplications]=useState([]);
+  const [candidates,setCandidates]=useState([]);
+  const [tab,setTab]=useState("employer");
+  const [selectedJob,setSelectedJob]=useState(null);
+  const [viewingC,setViewingC]=useState(null);
+  const [jobView,setJobView]=useState("pipeline");
+  const [selectedRound,setSelectedRound]=useState("Applied");
+  const [selectedApp,setSelectedApp]=useState(null);
+
+  const load=async()=>{
+    setJobsAll((await ld(SK.JOBS,true))||[]);
+    setRequestsAll((await ld(SK.REQUESTS,true))||[]);
+    setApplications((await ld(SK.APPLICATIONS,true))||[]);
+    setCandidates((await ld(SK.CANDIDATES,true))||[]);
+  };
+  useEffect(()=>{load();},[refresh]);
+
+  // Scope this employer's own company data
+  const jobs=jobsAll.filter(j=>j.companyCode===session.code);
+  const requests=requestsAll.filter(r=>r.companyCode===session.code);
+
+  const appsForJob=code=>applications.filter(a=>a.jobCode===code);
+  const currentJob=selectedJob?jobs.find(j=>j.code===selectedJob.code)||selectedJob:null;
+
+  const normalizeJob=j=>({
+    ...j,
+    recruitmentProcess:j.recruitmentProcess?.length?j.recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x})),
+    emailSettings:{...DEFAULT_EMAIL_SETTINGS,...(j.emailSettings||{})}
+  });
+
+  const saveJob=async(updated)=>{
+    const all=(await ld(SK.JOBS,true))||[];
+    const idx=all.findIndex(j=>j.code===updated.code);
+    if(idx>=0)all[idx]=updated; else all.push(updated);
+    await sd(SK.JOBS,all,true);
+    setJobsAll(all);setSelectedJob(updated);onPost();
+  };
+
+  const toggleJobStatus=async(job)=>{
+    const updated={...job,status:job.status==="active"?"inactive":"active"};
+    const all=(await ld(SK.JOBS,true))||[];
+    const idx=all.findIndex(j=>j.code===job.code);
+    if(idx>=0)all[idx]=updated; else all.push(updated);
+    await sd(SK.JOBS,all,true);
+    setJobsAll(all);
+    if(selectedJob?.code===job.code)setSelectedJob(updated);
+    onPost();
+  };
+
+  const openJob=job=>{
+    const normalized=normalizeJob(job);
+    setSelectedJob(normalized);
+    setJobView("pipeline");
+    setSelectedRound(normalized.recruitmentProcess?.[0]?.name||"Applied");
+    setSelectedApp(null);
+  };
+
+  const updateApplication=async(app,patch)=>{
+    const all=(await ld(SK.APPLICATIONS,true))||[];
+    const idx=all.findIndex(a=>a.id===app.id); if(idx<0)return;
+    all[idx]={...all[idx],...patch,updatedAt:new Date().toISOString()};
+    await sd(SK.APPLICATIONS,all,true);setApplications(all);onPost();
+  };
+
+  const moveCandidate=async(app,round,status,reason,note)=>{
+    const jobNow=normalizeJob(currentJob);
+    const process=jobNow.recruitmentProcess||DEFAULT_RECRUITMENT_PROCESS;
+    const currentIndex=process.findIndex(r=>r.name===round);
+    let nextRound=round;
+    if(status==="next") nextRound=process[currentIndex+1]?.name||round;
+    if(status==="Reject") nextRound="Rejected";
+    if(status==="Pipeline") nextRound="Pipeline";
+    const now=new Date().toISOString();
+    const stageData={...(app.stageData||{}),[round]:{
+      status:status==="next"?"Passed":(status==="Pipeline"?"Move to Pipeline":status),
+      reason:(status==="next"||status==="Pipeline")?"":reason||"",
+      note:note||"",
+      updatedAt:now
+    }};
+    const applicationStatus=status==="Reject"?"rejected":(status==="Pass"?"passed":"processing");
+    await updateApplication(app,{currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now});
+    setSelectedApp({...app,currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now});
+
+    // Automation email, if the employer configured one for the destination stage
+    const cfg=(jobNow.emailSettings||{})[nextRound];
+    if(cfg?.enabled&&(cfg.subject||cfg.body)){
+      const candidateName=app.name||app.profileSnapshot?.name||"Candidate";
+      const candidateEmail=app.email||app.profileSnapshot?.email;
+      const fill=str=>(str||"")
+        .split("{{candidateName}}").join(candidateName)
+        .split("{{jobTitle}}").join(jobNow.title||"")
+        .split("{{company}}").join(jobNow.company||"");
+      sendAutomationEmail(candidateEmail,fill(cfg.subject),fill(cfg.body));
+    }
+  };
+
+  const viewApplication=async app=>{
+    const c=candidates.find(x=>x.code===app.candidateCode)||app.profileSnapshot||app;
+    setSelectedApp(app);
+    setViewingC({...c,application:app});
+  };
+
+  if(postingJob)return <PostJobPage onBack={()=>setPostingJob(false)} onSuccess={()=>{setPostingJob(false);onPost();}} company={company} session={session}/>;
+
+  if(selectedJob){
+    const j=normalizeJob(currentJob||selectedJob), apps=appsForJob(j.code), process=j.recruitmentProcess||DEFAULT_RECRUITMENT_PROCESS;
+    const roundApps=apps.filter(a=>(a.currentRound||"Applied")===selectedRound);
+    const selectedCandidate=selectedApp ? (candidates.find(x=>x.code===selectedApp.candidateCode)||selectedApp.profileSnapshot||selectedApp) : null;
+    const selectedStage=selectedApp ? ((selectedApp.stageData||{})[selectedRound]||{}) : {};
+    return <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
+      <button onClick={()=>setSelectedJob(null)} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:13,fontWeight:700,fontFamily:FONT,display:"flex",alignItems:"center",gap:6,marginBottom:"1.25rem"}}><Icon name="arrow-left" size={14}/>Back to Employer</button>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:16,flexWrap:"wrap",marginBottom:"1.25rem"}}>
+        <div><div style={{display:"flex",gap:8,alignItems:"center"}}><span style={{fontFamily:"monospace",fontSize:11,fontWeight:700,background:BRAND_LIGHT,color:BRAND,padding:"2px 8px",borderRadius:6}}>{j.code}</span><Badge color={j.status==="active"?"blue":"gray"}>{j.status==="active"?"Active":"Deactive"}</Badge></div><h1 style={{fontSize:26,fontWeight:800,color:BRAND,margin:"8px 0 4px"}}>{j.title}</h1><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{j.company} · {(j.locations||[]).join(", ")}</p></div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <Btn variant={j.status==="active"?"danger":"outline"} onClick={()=>toggleJobStatus(j)}><Icon name="power" size={14}/>{j.status==="active"?"Deactive":"Active"}</Btn>
+          <Btn variant="outline" onClick={()=>setJobView("edit")}><Icon name="edit" size={14}/>Edit</Btn>
+          <Btn variant="ghost" onClick={()=>setJobView("settings")}><Icon name="settings" size={14}/>Setting</Btn>
+        </div>
+      </div>
+
+      {jobView==="pipeline"&&<div>
+        <Card><div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{process.map(r=>{const count=apps.filter(a=>(a.currentRound||"Applied")===r.name).length;return <button key={r.name} onClick={()=>{setSelectedRound(r.name);setSelectedApp(null)}} style={{flex:1,minWidth:110,padding:"12px",background:selectedRound===r.name?BRAND_LIGHT:"var(--color-background-secondary)",border:selectedRound===r.name?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-tertiary)",borderRadius:10,textAlign:"center",cursor:"pointer",fontFamily:FONT}}><div style={{fontSize:13,fontWeight:800,color:BRAND}}>{r.name}</div><div style={{fontSize:20,fontWeight:800,color:BRAND,marginTop:4}}>{count}</div><div style={{fontSize:10,color:"var(--color-text-secondary)"}}>candidates</div></button>})}</div></Card>
+        <div style={{display:"grid",gridTemplateColumns:"minmax(220px,280px) 1fr",gap:16,alignItems:"start"}}>
+          <Card style={{padding:"1rem"}}>
+            <h3 style={{fontSize:12,fontWeight:800,color:BRAND,margin:"0 0 12px",textTransform:"uppercase",letterSpacing:1}}>{selectedRound}</h3>
+            {roundApps.length===0?<p style={{fontSize:13,color:"var(--color-text-secondary)",fontStyle:"italic"}}>No candidates in this process.</p>:
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>{roundApps.map(a=>{const c=candidates.find(x=>x.code===a.candidateCode)||a.profileSnapshot||a;return <button key={a.id} onClick={()=>viewApplication(a)} style={{textAlign:"left",padding:"10px 12px",borderRadius:9,border:selectedApp?.id===a.id?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-tertiary)",background:selectedApp?.id===a.id?BRAND_LIGHT:"var(--color-background-secondary)",cursor:"pointer",fontFamily:FONT}}><div style={{fontWeight:800,fontSize:13,color:BRAND}}>{c.name||a.name||"Candidate"}</div><div style={{fontSize:11,color:"var(--color-text-secondary)",marginTop:3}}>{c.position||a.position||"Application"}</div><div style={{fontSize:11,color:"var(--color-text-secondary)",marginTop:2,wordBreak:"break-word"}}>{c.email||a.email||"—"}</div><div style={{fontSize:11,color:"var(--color-text-secondary)",marginTop:2}}>{c.phone||a.phone||"—"}</div></button>})}</div>}
+          </Card>
+          <Card style={{minHeight:420}}>
+            {!selectedApp?<div style={{height:360,display:"flex",alignItems:"center",justifyContent:"center",color:"var(--color-text-secondary)",fontSize:13}}>Select a candidate to view application details.</div>:
+              <div>
+                <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"flex-start",marginBottom:"1rem"}}><div><h2 style={{fontSize:20,fontWeight:800,color:BRAND,margin:"0 0 4px"}}>{selectedCandidate?.name||"Candidate"}</h2><p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}>{selectedCandidate?.position||selectedApp.position||"Application"}</p></div><Badge color={selectedApp.status==="rejected"?"red":selectedApp.status==="passed"?"green":selectedApp.currentRound==="Pipeline"?"purple":"blue"}>{selectedRound}</Badge></div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"12px 24px",marginBottom:"1.25rem"}}>{[["Email",selectedCandidate?.email||selectedApp.email],["Phone",selectedCandidate?.phone||selectedApp.phone],["CV",selectedCandidate?.cvLink||selectedApp.cvLink],["Portfolio",selectedCandidate?.portfolio||selectedApp.portfolio],["Salary",selectedCandidate?.salary||selectedApp.salary],["Available",selectedCandidate?.onboard||selectedApp.onboard]].map(([l,v])=><div key={l}><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>{l}</p><p style={{fontSize:13,margin:0,wordBreak:"break-word"}}>{v||"—"}</p></div>)}</div>
+                <p style={{fontSize:13,lineHeight:1.7,margin:"0 0 1rem"}}>{selectedCandidate?.intro||"Application profile information."}</p>
+                {selectedStage.updatedAt&&<p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"0 0 1rem"}}>Last status update: {fmt(selectedStage.updatedAt)}</p>}
+                <StageAction app={selectedApp} round={selectedRound} onSave={(status,reason,note)=>moveCandidate(selectedApp,selectedRound,status,reason,note)} canNext={(()=>{const idx=process.findIndex(r=>r.name===selectedRound);return idx>=0&&idx<process.length-1&&selectedRound!=="Rejected"&&selectedRound!=="Pipeline";})()}/>
+              </div>}
+          </Card>
+        </div>
+      </div>}
+
+      {jobView==="edit"&&<JobEditPanel job={j} onSave={async updated=>{await saveJob(updated);setJobView("pipeline");}}/>}
+      {jobView==="settings"&&<EmailSettingsPanel job={j} onSave={async updated=>{await saveJob(updated);setJobView("pipeline");}}/>}
+    </div>;
+  }
+
+  return <div style={{maxWidth:1200,margin:"2rem auto",padding:"2rem 1rem 4rem",fontFamily:FONT}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"1.5rem",gap:12}}><div><h1 style={{fontSize:26,fontWeight:800,margin:"0 0 4px"}}>Employer</h1><p style={{color:"var(--color-text-secondary)",fontSize:13,margin:0}}>{company?.name} · Manage your job postings and recruitment pipeline.</p></div><Btn onClick={()=>setPostingJob(true)}><Icon name="plus" size={15}/>Post a job</Btn></div>
+    <div style={{display:"flex",gap:4,borderBottom:"0.5px solid var(--color-border-tertiary)",marginBottom:"1.5rem"}}>{[["employer","Employer","building"],["candidates","Request pool","users"]].map(([id,label,icon])=><button key={id} onClick={()=>setTab(id)} style={{background:"none",border:"none",cursor:"pointer",padding:"11px 14px",color:tab===id?BRAND:"var(--color-text-secondary)",fontWeight:tab===id?700:400,fontFamily:FONT,fontSize:13,borderBottom:tab===id?`2px solid ${BRAND}`:"2px solid transparent",display:"flex",gap:6,alignItems:"center"}}><Icon name={icon} size={14}/>{label}</button>)}</div>
+    {tab==="employer"&&<div>
+      {company&&<Card style={{display:"flex",justifyContent:"space-between",gap:16,alignItems:"flex-start"}}>
+        <div style={{display:"flex",gap:14,alignItems:"flex-start"}}>
+          <div style={{width:48,height:48,borderRadius:12,background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon name="building" size={22} style={{color:BRAND}}/></div>
+          <div>
+            <h3 style={{fontSize:17,fontWeight:800,color:BRAND,margin:"0 0 3px"}}>{company.name}</h3>
+            <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:"0 0 6px"}}>{company.industry}{company.teamSize?` · ${company.teamSize} employees`:""}{company.taxCode?` · Tax code ${company.taxCode}`:""}</p>
+            {company.address&&<p style={{fontSize:12,margin:"0 0 4px",display:"flex",gap:6,alignItems:"flex-start"}}><Icon name="map-pin" size={13} style={{color:BRAND_DIM,flexShrink:0,marginTop:2}}/>{company.address}</p>}
+            {company.website&&<p style={{fontSize:12,margin:"0 0 8px",display:"flex",gap:6,alignItems:"flex-start"}}><Icon name="world" size={13} style={{color:BRAND_DIM,flexShrink:0,marginTop:2}}/><a href={company.website} target="_blank" rel="noreferrer" style={{color:BRAND}}>{company.website}</a></p>}
+            {company.intro&&<p style={{fontSize:13,lineHeight:1.7,margin:0,maxWidth:640}}>{company.intro}</p>}
+          </div>
+        </div>
+        <button onClick={()=>setTab("company")} title="Edit company profile" style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,width:34,height:34,borderRadius:9,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon name="pencil" size={15}/></button>
+      </Card>}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(200px,1fr))",gap:12,margin:"1.25rem 0 1.5rem"}}>
+        {[
+          {label:"Active Jobs",value:jobs.filter(j=>j.status==="active").length,icon:"briefcase"},
+          {label:"Talent Pool Requests",value:requests.length,icon:"users"},
+          {label:"Contacts Obtained",value:requests.filter(r=>r.status==="accepted").length,icon:"mail-check"}
+        ].map(stat=>(
+          <Card key={stat.label} style={{marginBottom:0,display:"flex",alignItems:"center",gap:14}}>
+            <div style={{width:44,height:44,borderRadius:12,background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon name={stat.icon} size={20} style={{color:BRAND}}/></div>
+            <div><p style={{fontSize:24,fontWeight:800,color:BRAND,margin:"0 0 2px"}}>{stat.value}</p><p style={{fontSize:11,fontWeight:700,color:"var(--color-text-secondary)",textTransform:"uppercase",letterSpacing:.5,margin:0}}>{stat.label}</p></div>
+          </Card>
+        ))}
+      </div>
+      <h3 style={{fontSize:13,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"0 0 10px"}}>Your Jobs</h3>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {jobs.length===0&&<p style={{textAlign:"center",color:"var(--color-text-secondary)",padding:"3rem"}}>No jobs posted yet.</p>}
+        {jobs.map(j=>{const apps=appsForJob(j.code);const isActive=j.status==="active";return <div key={j.code} style={{textAlign:"left",background:isActive?"var(--color-background-primary)":"var(--color-background-secondary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:14,padding:"1.25rem",fontFamily:FONT,opacity:isActive?1:0.65}}><button onClick={()=>openJob(j)} style={{width:"100%",textAlign:"left",background:"none",border:"none",padding:0,cursor:"pointer",fontFamily:FONT,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12}}><div><div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}><span style={{fontFamily:"monospace",fontSize:11,fontWeight:700,background:isActive?BRAND_LIGHT:"#e5e7eb",color:isActive?BRAND:"#6b7280",padding:"2px 8px",borderRadius:6}}>{j.code}</span><Badge color={isActive?"blue":"gray"}>{isActive?"Active":"Deactive"}</Badge></div><h3 style={{fontWeight:700,fontSize:16,margin:"0 0 3px",color:isActive?BRAND:"#6b7280"}}>{j.title}</h3><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{j.company} · {(j.locations||[]).join(", ")}</p></div><div style={{textAlign:"center",flexShrink:0,padding:"6px 14px",background:isActive?BRAND_LIGHT:"#e5e7eb",borderRadius:10}}><div style={{fontSize:20,fontWeight:800,color:isActive?BRAND:"#6b7280"}}>{apps.length}</div><div style={{fontSize:10,color:isActive?BRAND_DIM:"#6b7280",whiteSpace:"nowrap"}}>applicant{apps.length!==1?"s":""}</div></div></button></div>})}
+      </div>
+    </div>}
+    {tab==="company"&&company&&<div style={{maxWidth:680}}><CompanyProfilePage session={session} existing={company} onSaved={(c)=>{onCompanyUpdated&&onCompanyUpdated(c);setTab("employer");}}/></div>}
+    {tab==="candidates"&&<div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13,fontFamily:FONT}}><thead><tr style={{background:"var(--color-background-secondary)"}}>{["Code","Position","Field","Industry","Location","Experience","Salary","Sharing","Date"].map(h=><th key={h} style={{textAlign:"left",padding:"10px 12px",fontWeight:700,fontSize:11,color:"var(--color-text-secondary)",whiteSpace:"nowrap",textTransform:"uppercase",letterSpacing:.5}}>{h}</th>)}</tr></thead><tbody>{candidates.map((c,i)=><tr key={c.code} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"var(--color-background-primary)":"var(--color-background-secondary)"}}><td style={{padding:"10px 12px",fontFamily:"monospace",fontWeight:700,fontSize:12,color:BRAND}}>{c.code}</td><td style={{padding:"10px 12px",fontWeight:500}}>{c.position}</td><td style={{padding:"10px 12px"}}>{c.field&&<Badge color="purple">{c.field}</Badge>}</td><td style={{padding:"10px 12px",color:"var(--color-text-secondary)"}}>{(c.industries||[]).join(", ")}</td><td style={{padding:"10px 12px"}}>{(c.locations||[]).join(", ")}</td><td style={{padding:"10px 12px"}}>{c.years}</td><td style={{padding:"10px 12px"}}>{c.salary||"—"}</td><td style={{padding:"10px 12px"}}><Badge color={c.shareActive?"blue":"gray"}>{c.shareActive?"Public":"Private"}</Badge></td><td style={{padding:"10px 12px",color:"var(--color-text-secondary)"}}>{fmt(c.createdAt)}</td></tr>)}{candidates.length===0&&<tr><td colSpan={9} style={{padding:"2rem",textAlign:"center",color:"var(--color-text-secondary)"}}>No candidates yet</td></tr>}</tbody></table></div>}
+  </div>;
+}
+
+function StageAction({app,round,onSave,canNext}){
+  const existing=(app.stageData||{})[round]||{};
+  const [status,setStatus]=useState("");
+  const [reason,setReason]=useState(existing.reason||"");
+  const [note,setNote]=useState(existing.note||"");
+  const needsReason=status==="Reject";
+  const chooseStatus=(value)=>{
+    setStatus(value);
+    if(value==="Pending"||value==="Pass"||value==="Reject"||value==="next"||value==="Pipeline"){
+      onSave(value,reason,note);
+      setStatus("");
+    }
+  };
+  return <div style={{marginTop:12,paddingTop:12,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+    <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+      <select value={status} onChange={e=>chooseStatus(e.target.value)} style={{width:"auto",minWidth:180}}>
+        <option value="">Update status…</option>
+        {canNext&&<option value="next">Move to next step</option>}
+        <option value="Pass">Pass</option>
+        <option value="Reject">Reject</option>
+        <option value="Pending">Pending</option>
+        <option value="Pipeline">Move to Pipeline</option>
+      </select>
+      {needsReason&&<select value={reason} onChange={e=>{setReason(e.target.value);if(e.target.value)onSave("Reject",e.target.value,note)}} style={{width:"auto",minWidth:180}}>
+        <option value="">Select reason…</option>{ROUND_REASONS.map(r=><option key={r}>{r}</option>)}
+      </select>}
+      <input value={note} onChange={e=>setNote(e.target.value)} placeholder="Note for this candidate…" style={{flex:1,minWidth:220}}/>
+    </div>
+    <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"8px 0 0"}}>Selecting a status applies the action immediately.</p>
+  </div>;
+}
+
+function RichTextEditor({value,onChange,minHeight=140}){
+  const ref=useRef(null);
+  const initialized=useRef(false);
+  useEffect(()=>{
+    if(!initialized.current && ref.current){
+      ref.current.innerHTML=value||"";
+      initialized.current=true;
+    }
+  },[]);
+  const exec=(cmd,arg)=>{
+    if(ref.current) ref.current.focus();
+    document.execCommand(cmd,false,arg);
+    if(ref.current) onChange(ref.current.innerHTML);
+  };
+  const tools=[["bold","bold","Bold"],["italic","italic","Italic"],["underline","underline","Underline"],["insertUnorderedList","list","Bullet list"],["insertOrderedList","list-numbers","Numbered list"]];
+  return <div>
+    <div style={{display:"flex",gap:4,flexWrap:"wrap",alignItems:"center",marginBottom:6,padding:"6px 8px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:8}}>
+      {tools.map(([cmd,icon,title])=>(
+        <button key={cmd} type="button" title={title} onMouseDown={e=>e.preventDefault()} onClick={()=>exec(cmd)} style={{width:30,height:30,border:"0.5px solid var(--color-border-secondary)",background:"#fff",borderRadius:6,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",color:BRAND}}>
+          <Icon name={icon} size={14}/>
+        </button>
+      ))}
+      <select onMouseDown={e=>e.stopPropagation()} onChange={e=>{if(e.target.value){exec("fontSize",e.target.value);e.target.value="";}}} style={{width:"auto",fontSize:11,padding:"4px 6px"}}>
+        <option value="">Size</option>
+        <option value="2">Small</option>
+        <option value="3">Normal</option>
+        <option value="5">Large</option>
+        <option value="7">Huge</option>
+      </select>
+    </div>
+    <div ref={ref} contentEditable suppressContentEditableWarning onInput={e=>onChange(e.currentTarget.innerHTML)} style={{minHeight,padding:"10px 12px",border:"0.5px solid var(--color-border-secondary)",borderRadius:8,fontFamily:FONT,fontSize:13,background:"var(--color-background-primary)",outline:"none",overflowY:"auto",lineHeight:1.6}}/>
+  </div>;
+}
+
+function JobEditPanel({job,onSave}){
+  const [form,setForm]=useState({...job,recruitmentProcess:(job.recruitmentProcess||DEFAULT_RECRUITMENT_PROCESS).map(x=>({...x}))});
+  const s=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const updateRound=(i,k,v)=>setForm(f=>({...f,recruitmentProcess:f.recruitmentProcess.map((r,idx)=>idx===i?{...r,[k]:v}:r)}));
+  const addRound=()=>setForm(f=>({...f,recruitmentProcess:[...f.recruitmentProcess,{name:"New stage",description:""}]}));
+  const removeRound=i=>setForm(f=>({...f,recruitmentProcess:f.recruitmentProcess.filter((_,idx)=>idx!==i)}));
+  return <div>
+    <Card><SH icon="file-description" title="Edit Job Description"/>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}><F label="Job title"><input style={inp} value={form.title||""} onChange={e=>s("title",e.target.value)}/></F><F label="Company"><input style={inp} value={form.company||""} onChange={e=>s("company",e.target.value)}/></F></div>
+      <F label="Job Summary"><RichTextEditor value={form.summary||""} onChange={v=>s("summary",v)} minHeight={70}/></F>
+      <F label="Description" hint="Use the toolbar to format text (bold, italic, lists, size)."><RichTextEditor value={form.description||""} onChange={v=>s("description",v)}/></F>
+      <F label="Requirements"><RichTextEditor value={form.requirements||""} onChange={v=>s("requirements",v)} minHeight={90}/></F>
+      <F label="Benefits"><RichTextEditor value={form.benefits||""} onChange={v=>s("benefits",v)} minHeight={70}/></F>
+      <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:BRAND,fontWeight:700,cursor:"pointer"}}><input type="checkbox" checked={!!form.benefitsReusable} onChange={e=>s("benefitsReusable",e.target.checked)} style={{width:16,height:16,accentColor:BRAND}}/>Use these benefits as a selectable template for future job postings</label>
+    </Card>
+    <Card><SH icon="git-merge" title="Recruitment Pipeline"/>
+      {form.recruitmentProcess.map((r,i)=><div key={i} style={{display:"grid",gridTemplateColumns:"1fr 1.5fr auto",gap:10,alignItems:"start",padding:"12px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+        <input style={inp} value={r.name||""} onChange={e=>updateRound(i,"name",e.target.value)} placeholder="Stage name"/>
+        <textarea style={{...inp,minHeight:60}} value={r.description||""} onChange={e=>updateRound(i,"description",e.target.value)} placeholder={`What happens in ${r.name||"this stage"}?`}/>
+        <Btn variant="danger" onClick={()=>removeRound(i)} style={{fontSize:11,padding:"7px 10px"}}><Icon name="trash" size={13}/></Btn>
+      </div>)}
+      <Btn variant="outline" onClick={addRound} style={{marginTop:12}}><Icon name="plus" size={14}/>Add stage</Btn>
+    </Card>
+    <Btn onClick={()=>onSave(form)} style={{width:"100%",justifyContent:"center",padding:"13px"}}>Save changes</Btn>
+  </div>;
+}
+
+function EmailSettingsPanel({job,onSave}){
+  const [settings,setSettings]=useState({...(job.emailSettings||{})});
+  const [addingRound,setAddingRound]=useState("");
+  const availableStages=(job.recruitmentProcess||DEFAULT_RECRUITMENT_PROCESS).map(r=>r.name);
+  const configured=Object.keys(settings);
+  const notYetAdded=availableStages.filter(r=>!configured.includes(r));
+  const update=(round,k,v)=>setSettings(s=>({...s,[round]:{...s[round],[k]:v}}));
+  const addStage=()=>{
+    if(!addingRound)return;
+    setSettings(s=>({...s,[addingRound]:{enabled:true,subject:`Update on your application — ${addingRound}`,body:`Hi {{candidateName}},\n\nThank you for your interest in {{jobTitle}}.\n\nWe would like to update you regarding the ${addingRound} stage of your application.\n\nBest regards,\n{{company}}`}}));
+    setAddingRound("");
+  };
+  const removeStage=round=>setSettings(s=>{const c={...s};delete c[round];return c;});
+  return <div>
+    <Card><SH icon="mail" title="Email response settings"/>
+      <p style={{fontSize:13,color:"var(--color-text-secondary)",marginTop:0}}>Add the recruitment stages you want to automatically email candidates for, and customize the subject/body. Use placeholders such as {"{{candidateName}}"}, {"{{jobTitle}}"}, and {"{{company}}"}.</p>
+      {configured.length===0&&<p style={{fontSize:13,color:"var(--color-text-secondary)",fontStyle:"italic",padding:"0.5rem 0 1rem"}}>No automation stages added yet — use the selector below to add one.</p>}
+      {configured.map(r=>(
+        <div key={r} style={{padding:"1rem 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <label style={{display:"flex",alignItems:"center",gap:8,fontWeight:800,fontSize:13,color:BRAND}}>
+              <input type="checkbox" checked={!!settings[r]?.enabled} onChange={e=>update(r,"enabled",e.target.checked)} style={{width:16,height:16,accentColor:BRAND}}/>{r}
+            </label>
+            <button onClick={()=>removeStage(r)} title="Remove this stage" style={{background:"none",border:"none",cursor:"pointer",color:"#E24B4A",display:"flex",alignItems:"center"}}><Icon name="trash" size={15}/></button>
+          </div>
+          <div style={{display:"grid",gap:8,marginTop:8}}>
+            <input value={settings[r]?.subject||""} onChange={e=>update(r,"subject",e.target.value)} placeholder="Email subject"/>
+            <textarea style={{...inp,minHeight:90}} value={settings[r]?.body||""} onChange={e=>update(r,"body",e.target.value)} placeholder="Email body"/>
+          </div>
+        </div>
+      ))}
+      {notYetAdded.length>0&&<div style={{display:"flex",gap:8,marginTop:configured.length?12:0,alignItems:"center",flexWrap:"wrap"}}>
+        <select value={addingRound} onChange={e=>setAddingRound(e.target.value)} style={{width:"auto",minWidth:180}}>
+          <option value="">-- Select a stage --</option>
+          {notYetAdded.map(r=><option key={r}>{r}</option>)}
+        </select>
+        <Btn variant="outline" onClick={addStage}><Icon name="plus" size={14}/>Add stage</Btn>
+      </div>}
+    </Card>
+    <Btn onClick={()=>onSave({...job,emailSettings:settings})} style={{width:"100%",justifyContent:"center",padding:"13px"}}>Save email settings</Btn>
+  </div>;
+}
+
+function CandidateModal({viewingC,onClose}){return <div style={{position:"fixed",inset:0,background:"rgba(0,30,80,.45)",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center",padding:"1rem"}}><div style={{background:"#fff",borderRadius:20,maxWidth:700,width:"100%",maxHeight:"90vh",overflow:"auto",padding:"2rem",fontFamily:FONT}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}><div><span style={{fontFamily:"monospace",fontWeight:700,color:BRAND}}>{viewingC.code||viewingC.application?.id}</span><h2 style={{fontSize:22,color:BRAND,margin:"8px 0 4px"}}>{viewingC.name||"Candidate Profile"}</h2><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{viewingC.position||viewingC.application?.jobTitle}</p></div><button onClick={onClose} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",fontSize:16,color:BRAND,width:32,height:32,borderRadius:"50%"}}>✕</button></div><Card style={{marginTop:"1.25rem"}}><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"12px 24px"}}>{[["Email",viewingC.email||viewingC.application?.email],["Phone",viewingC.phone||viewingC.application?.phone],["CV",viewingC.cvLink||viewingC.application?.cvLink],["Portfolio",viewingC.portfolio||viewingC.application?.portfolio],["Salary",viewingC.salary||viewingC.application?.salary],["Available",viewingC.onboard||viewingC.application?.onboard]].map(([l,v])=><div key={l}><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>{l}</p><p style={{fontSize:13,margin:0,wordBreak:"break-word"}}>{v||"—"}</p></div>)}</div><p style={{fontSize:13,lineHeight:1.7,margin:"1.25rem 0 0"}}>{viewingC.intro||"Application profile information."}</p></Card></div></div>}
+
+// ── NOTIFICATIONS ─────────────────────────────────────────────────────────────
+function NotificationsPage({onRefresh,role,session,onBack}){
+  const [notifs,setNotifs]=useState([]);
+  const typeIcon={contact_request:"mail",response:"check-circle",job_posted:"briefcase",application:"file-text",system:"bell"};
+
+  useEffect(()=>{
+    (async()=>{
+      const all=((await ld(SK.NOTIFS,true))||[]).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      const scoped=all.filter(x=>role==="jobseeker"
+        ?(x.to===session?.code||x.to==="jobseeker"||x.to==="all")
+        :(x.to===session?.email||x.to==="employer"||x.to==="all"));
+      setNotifs(scoped);
+      const unread=scoped.filter(n=>!n.read);
+      if(unread.length){
+        const updated=all.map(n=>scoped.some(s=>s.id===n.id)?{...n,read:true}:n);
+        await sd(SK.NOTIFS,updated,true);
+        onRefresh();
+      }
+    })();
+  },[]);
+
+  return(
+    <div style={{maxWidth:680,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
+      <button onClick={onBack} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:13,fontWeight:600,fontFamily:FONT,marginBottom:"1.25rem",display:"flex",alignItems:"center",gap:6}}><Icon name="arrow-left" size={14}/>Back</button>
+      <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Notifications</h1>
+      <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>All new notifications appear here automatically.</p>
+      {notifs.length===0&&<p style={{textAlign:"center",color:"var(--color-text-secondary)",padding:"3rem"}}>No notifications yet.</p>}
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {notifs.map(n=>(
+          <div key={n.id} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:14,padding:"1.25rem"}}>
+            <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+              <div style={{width:36,height:36,borderRadius:"50%",background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon name={typeIcon[n.type]||"bell"} size={16} style={{color:BRAND}}/></div>
+              <div style={{flex:1}}>
+                <p style={{fontSize:14,fontWeight:600,margin:"0 0 4px",lineHeight:1.5}}>{n.message||`${n.type} notification`}</p>
+                <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}>{fmt(n.createdAt)}</p>
+                {n.type==="response"&&n.action&&<div style={{marginTop:8,padding:"8px 12px",background:n.action==="accepted"?BRAND_LIGHT:"#FDEAEA",borderRadius:8,fontSize:13}}><strong>Candidate {n.candidateCode}</strong> has <strong>{n.action==="accepted"?"accepted ✓":"declined ✕"}</strong> your contact request for <em>{n.position}</em>.</div>}
+                {n.type==="application"&&<div style={{marginTop:8,padding:"8px 12px",background:BRAND_LIGHT,borderRadius:8,fontSize:13}}>Application received for <strong>{n.title}</strong>.</div>}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── APP ───────────────────────────────────────────────────────────────────────
+function App(){
+  const [role,setRole]=useState(null);
+  const [session,setSession]=useState(null);
+  const [company,setCompany]=useState(null);   // employer's company profile, or undefined until checked
+  const [companyChecked,setCompanyChecked]=useState(false);
+  const [booting,setBooting]=useState(true);
+  const [page,setPage]=useState("candidate");
+  const [prevPage,setPrevPage]=useState("candidate");
+  const [refresh,setRefresh]=useState(0);
+  const [notifCount,setNotifCount]=useState(0);
+  const [showSync,setShowSync]=useState(false);
+  const isAdmin=typeof window!=="undefined"&&window.location.hash==="#admin";
+  const bump=useCallback(()=>setRefresh(r=>r+1),[]);
+
+  // Restore session on load (checks both "remembered" (7-day) and session-only storage)
+  useEffect(()=>{
+    (async()=>{
+      let s=await ld(SK.SESSION,true);
+      if(s&&s.expiresAt&&s.expiresAt<Date.now()){ await sd(SK.SESSION,null,true); s=null; }
+      if(!s){
+        try{ const raw=sessionStorage.getItem(SK.SESSION); if(raw)s=JSON.parse(raw); }catch(e){}
+      }
+      if(s){
+        setRole(s.role);setSession(s);
+        setPage(s.role==="jobseeker"?"candidate":"employer");
+      }
+      setBooting(false);
+    })();
+  },[]);
+
+  // Check / load company profile whenever an employer session is active
+  useEffect(()=>{
+    if(session?.role==="employer"){
+      setCompanyChecked(false);
+      (async()=>{
+        const all=(await ld(SK.COMPANIES,true))||[];
+        const found=all.find(c=>c.code===session.code)||null;
+        setCompany(found);
+        setCompanyChecked(true);
+      })();
+    }
+  },[session,refresh]);
+
+  useEffect(()=>{(async()=>{
+    const n=(await ld(SK.NOTIFS,true))||[];
+    const relevant=n.filter(x=>{
+      if(!session)return false;
+      return session.role==="jobseeker"
+        ?(x.to===session.code||x.to==="jobseeker"||x.to==="all")
+        :(x.to===session.email||x.to==="employer"||x.to==="all");
+    });
+    setNotifCount(relevant.filter(x=>!x.read).length);
+  })();},[refresh,session]);
+
+  const openNotifs=()=>{ if(page!=="notifications"){ setPrevPage(page); setPage("notifications"); } };
+
+  const clearSession=async()=>{
+    await sd(SK.SESSION,null,true);
+    try{sessionStorage.removeItem(SK.SESSION);}catch(e){}
+  };
+
+  const logout=async()=>{
+    await clearSession();
+    setSession(null);setRole(null);setCompany(null);setCompanyChecked(false);
+  };
+
+  const deleteAccount=async()=>{
+    if(!window.confirm("This will permanently delete your account and profile data. This cannot be undone. Continue?"))return;
+    if(session.role==="jobseeker"){
+      const accounts=((await ld(SK.ACCOUNTS_JS,true))||[]).filter(a=>a.email.toLowerCase()!==session.email.toLowerCase());
+      await sd(SK.ACCOUNTS_JS,accounts,true);
+      await sd("pairup_my_profile_"+session.email,null,true);
+      const candidates=((await ld(SK.CANDIDATES,true))||[]).filter(c=>c.code!==session.code);
+      await sd(SK.CANDIDATES,candidates,true);
+    }else{
+      const accounts=((await ld(SK.ACCOUNTS_EMP,true))||[]).filter(a=>a.email.toLowerCase()!==session.email.toLowerCase());
+      await sd(SK.ACCOUNTS_EMP,accounts,true);
+      const companies=((await ld(SK.COMPANIES,true))||[]).filter(c=>c.code!==session.code);
+      await sd(SK.COMPANIES,companies,true);
+    }
+    await clearSession();
+    setSession(null);setRole(null);setCompany(null);setCompanyChecked(false);
+  };
+
+  if(booting)return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--color-background-tertiary)"}}>
+      <Icon name="loader-2" size={26} style={{color:BRAND,animation:"spin 1s linear infinite"}}/>
+    </div>
+  );
+
+  if(!role)return <RoleSelection onSelect={r=>setRole(r)}/>;
+
+  if(!session)return <AuthPage role={role} onBack={()=>setRole(null)} onAuthed={s=>{setSession(s);setPage(s.role==="jobseeker"?"candidate":"employer");}}/>;
+
+  if(session.role==="employer"&&!companyChecked)return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--color-background-tertiary)"}}>
+      <Icon name="loader-2" size={26} style={{color:BRAND,animation:"spin 1s linear infinite"}}/>
+    </div>
+  );
+
+  if(session.role==="employer"&&companyChecked&&!company){
+    return <CompanyProfilePage session={session} onSaved={(c)=>{setCompany(c);}}/>;
+  }
+
+  return(
+    <div style={{minHeight:"100vh",background:"var(--color-background-tertiary)",fontFamily:FONT}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;500;600;700;800&display=swap');
+        @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+        input,select,textarea{font-family:'Noto Sans Khmer',sans-serif;font-size:13px;padding:8px 12px;border:0.5px solid var(--color-border-secondary);border-radius:8px;outline:none;background:var(--color-background-primary);color:var(--color-text-primary);width:100%;box-sizing:border-box;}
+        input:focus,select:focus,textarea:focus{border-color:${BRAND};box-shadow:0 0 0 3px ${BRAND}18;}
+        select{width:auto;}
+      `}</style>
+      <Nav page={page} setPage={setPage} notifCount={notifCount} role={role} onLogout={logout} onDeleteAccount={deleteAccount} onOpenSync={()=>setShowSync(true)} showSync={isAdmin} onOpenNotifs={openNotifs}/>
+      {page==="candidate"&&role==="jobseeker"&&<CandidatePage onSubmit={bump} refresh={refresh} session={session}/>}
+      {page==="public"&&<PublicPage onRequest={bump} session={session} company={company}/>}
+      {page==="jobs"&&role==="jobseeker"&&<JobsPage onApply={bump} session={session}/>}
+      {page==="employer"&&role==="employer"&&<EmployerPage onPost={bump} refresh={refresh} session={session} company={company} onCompanyUpdated={setCompany}/>}
+      {page==="notifications"&&<NotificationsPage onRefresh={bump} role={role} session={session} onBack={()=>setPage(prevPage)}/>}
+      {showSync&&<SyncSettingsModal onClose={()=>setShowSync(false)}/>}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
