@@ -863,7 +863,7 @@ function SyncSettingsModal({onClose}){
   const [clientId,setClientId]=useState("");
   const [saved,setSaved]=useState(false);
   const [testing,setTesting]=useState(false);
-  const [testResult,setTestResult]=useState(null); // {ok, message}
+  const [testResults,setTestResults]=useState(null); // [{sheet, ok, message}]
   useEffect(()=>{
     ld(GSHEET_URL_KEY,true).then(u=>setUrl(u||""));
     ld(GOOGLE_CLIENT_ID_KEY,true).then(c=>setClientId(c||""));
@@ -873,28 +873,24 @@ function SyncSettingsModal({onClose}){
     await sd(GOOGLE_CLIENT_ID_KEY,clientId.trim(),true);
     setSaved(true);setTimeout(()=>setSaved(false),1800);
   };
-  const testConnection=async()=>{
-    setTesting(true);setTestResult(null);
+  const checkOneSheet=async(activeUrl,sheetName)=>{
     try{
-      const activeUrl=url.trim()||DEFAULT_GSHEET_URL;
-      const res=await fetch(activeUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"list",sheet:"Jobs"})});
+      const res=await fetch(activeUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"list",sheet:sheetName})});
       const text=await res.text();
       let data;
       try{ data=JSON.parse(text); }
-      catch(e){
-        setTestResult({ok:false,message:"The Apps Script didn't return JSON (got HTML/other). This usually means the Web App's access isn't set to \"Anyone\", or the URL is wrong."});
-        setTesting(false);return;
-      }
-      if(!data||data.success===false){
-        setTestResult({ok:false,message:`Apps Script responded with an error: ${data?.error||"unknown"}${data?.message?" — "+data.message:""}`});
-      }else if(!Array.isArray(data.rows)){
-        setTestResult({ok:false,message:'Connected, but the response has no "rows" array — this is an OUTDATED deployment. In Apps Script: Deploy → Manage deployments → Edit → Version: New version → Deploy, then test again.'});
-      }else{
-        setTestResult({ok:true,message:`Connected! "Jobs" sheet has ${data.rows.length} row(s). Sync is working correctly.`});
-      }
-    }catch(e){
-      setTestResult({ok:false,message:"Could not reach the Apps Script URL at all (network error or wrong URL)."});
-    }
+      catch(e){ return {sheet:sheetName,ok:false,message:"Didn't return JSON (got HTML/other) — Web App access likely isn't set to \"Anyone\"."}; }
+      if(!data||data.success===false) return {sheet:sheetName,ok:false,message:`Error: ${data?.error||"unknown"}${data?.message?" — "+data.message:""}`};
+      if(!Array.isArray(data.rows)) return {sheet:sheetName,ok:false,message:'No "rows" array in response — OUTDATED deployment. Redeploy: Deploy → Manage deployments → Edit → New version → Deploy.'};
+      return {sheet:sheetName,ok:true,message:`${data.rows.length} row(s)`};
+    }catch(e){ return {sheet:sheetName,ok:false,message:"Network error — could not reach this URL at all."}; }
+  };
+  const testConnection=async()=>{
+    setTesting(true);setTestResults(null);
+    const activeUrl=url.trim()||DEFAULT_GSHEET_URL;
+    const sheetNames=[...new Set(Object.values(SHEET_MAP).map(m=>m.sheet))];
+    const results=await Promise.all(sheetNames.map(name=>checkOneSheet(activeUrl,name)));
+    setTestResults(results);
     setTesting(false);
   };
   return(
@@ -908,8 +904,14 @@ function SyncSettingsModal({onClose}){
         <F label="Web App URL override (optional)"><input style={inp} value={url} onChange={e=>setUrl(e.target.value)} placeholder={DEFAULT_GSHEET_URL}/></F>
         <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"-0.5rem 0 1rem",wordBreak:"break-all"}}>Currently active: {url.trim()||DEFAULT_GSHEET_URL}</p>
         <Btn variant="outline" onClick={testConnection} style={{width:"100%",justifyContent:"center",marginBottom:"1rem"}} disabled={testing}>{testing?"Testing…":"Test connection"}</Btn>
-        {testResult&&(
-          <div style={{background:testResult.ok?"#E9F7EE":"#FFF1F0",border:`1px solid ${testResult.ok?"#B7E4C7":"#FFC9C6"}`,borderRadius:10,padding:"0.75rem 1rem",marginBottom:"1.25rem",fontSize:12,color:testResult.ok?"#1E6B3A":"#8A2A26",lineHeight:1.5}}>{testResult.message}</div>
+        {testResults&&(
+          <div style={{marginBottom:"1.25rem",display:"flex",flexDirection:"column",gap:6}}>
+            {testResults.map(r=>(
+              <div key={r.sheet} style={{background:r.ok?"#E9F7EE":"#FFF1F0",border:`1px solid ${r.ok?"#B7E4C7":"#FFC9C6"}`,borderRadius:10,padding:"0.6rem 0.9rem",fontSize:12,color:r.ok?"#1E6B3A":"#8A2A26",lineHeight:1.5,display:"flex",gap:8}}>
+                <strong style={{flexShrink:0}}>{r.sheet}:</strong><span>{r.message}</span>
+              </div>
+            ))}
+          </div>
         )}
         <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"1.25rem 0 1rem"}}>Google Sign-In requires an OAuth Client ID from Google Cloud Console with this page's origin added as an authorized JavaScript origin.</p>
         <F label="Google OAuth Client ID"><input style={inp} value={clientId} onChange={e=>setClientId(e.target.value)} placeholder="xxxxxxxxxx.apps.googleusercontent.com"/></F>
