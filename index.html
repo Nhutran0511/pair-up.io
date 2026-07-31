@@ -59,9 +59,10 @@ function fmt(iso){return iso?new Date(iso).toLocaleDateString("en-GB",{day:"2-di
 // ── GOOGLE SHEETS SYNC ────────────────────────────────────────────────────────
 // Static pages can't write to a private Google Sheet directly; a small Google Apps
 // Script deployed as a Web App acts as the bridge. Paste its deployed URL into the
-// sync settings (cloud icon in the nav, admin-only via #admin). This is only used
-// for candidate profiles ("Job Seekers" sheet) and job applications ("Applied"
-// sheet) — account/login data is never sent here.
+// sync settings (cloud icon in the nav, admin-only via #admin). It's used for
+// candidate profiles ("Job Seekers" sheet), job applications ("Applied" sheet),
+// and — when configured — sign up / log in, which are handled by the same Web
+// App reading/writing a "Users" sheet (see sheetSignup/sheetLogin below).
 async function pushToSheet(sheetName,data){
   try{
     const url=(await ld(GSHEET_URL_KEY,true))||"";
@@ -78,6 +79,37 @@ async function sendAutomationEmail(to,subject,body){
     await fetch(url,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"send_email",to,subject,body})});
     return true;
   }catch(e){ console.error("Automation email failed",e); return false; }
+}
+
+// ── AUTH VIA GOOGLE SHEET (Apps Script bridge) ────────────────────────────────
+// Flow: Frontend --POST email/password--> Apps Script --reads Google Sheet--> finds
+// email --> checks password --> returns {success, token/code} or {success:false, error}.
+// Requires the same Apps Script Web App URL configured in Integrations (cloud icon,
+// admin-only via #admin) to also implement doPost actions "signup" and "login"
+// (see the accompanying Code.gs for the reference implementation). If no URL is
+// configured, callers should fall back to local-only auth so the app still works
+// in preview/demo mode.
+async function isSheetAuthConfigured(){
+  const url=(await ld(GSHEET_URL_KEY,true))||"";
+  return !!url;
+}
+async function sheetSignup(role,email,password,suggestedCode){
+  const url=(await ld(GSHEET_URL_KEY,true))||"";
+  if(!url) return {success:false,error:"not_configured"};
+  try{
+    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"signup",role,email,password,suggestedCode})});
+    const data=await res.json();
+    return data;
+  }catch(e){ console.error("Sheet signup failed",e); return {success:false,error:"network"}; }
+}
+async function sheetLogin(role,email,password){
+  const url=(await ld(GSHEET_URL_KEY,true))||"";
+  if(!url) return {success:false,error:"not_configured"};
+  try{
+    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"login",role,email,password})});
+    const data=await res.json();
+    return data;
+  }catch(e){ console.error("Sheet login failed",e); return {success:false,error:"network"}; }
 }
 
 // ── PASSWORD HASHING ──────────────────────────────────────────────────────────
@@ -430,8 +462,26 @@ function AuthPage({role,onAuthed,onBack}){
     if(form.confirm!==form.password)e.confirm="Passwords do not match";
     if(Object.keys(e).length){setErrors(e);return;}
     setBusy(true);
-    const accounts=(await ld(accountsKey,true))||[];
     const emailNorm=form.email.trim().toLowerCase();
+
+    // ── Preferred path: Apps Script writes the new user straight into the Google Sheet ──
+    if(await isSheetAuthConfigured()){
+      const code=role==="jobseeker"?await nextCode():("CO"+gid());
+      const result=await sheetSignup(role,form.email.trim(),form.password,code);
+      if(!result||result.success===false){
+        setBusy(false);
+        setErrors({email:result&&result.error==="exists"?"Email already exists. Please log in instead.":"Could not create your account. Please try again."});
+        return;
+      }
+      const session={role,email:form.email.trim(),code:result.code||code,token:result.token||(gid()+gid())};
+      await persistSession(session);
+      setBusy(false);
+      onAuthed(session);
+      return;
+    }
+
+    // ── Fallback: local-only demo mode (no Apps Script URL configured) ──
+    const accounts=(await ld(accountsKey,true))||[];
     if(accounts.find(a=>a.email.toLowerCase()===emailNorm)){
       setBusy(false);
       setErrors({email:"Email already exists. Please log in instead."});
@@ -454,6 +504,26 @@ function AuthPage({role,onAuthed,onBack}){
     if(!form.password)e.password="Required";
     if(Object.keys(e).length){setErrors(e);return;}
     setBusy(true);
+
+    // ── Preferred path: Apps Script reads the Google Sheet, finds the email, checks the password ──
+    if(await isSheetAuthConfigured()){
+      const result=await sheetLogin(role,form.email.trim(),form.password);
+      setBusy(false);
+      if(!result||result.success===false){
+        const reason=result&&result.error;
+        setErrors({
+          email:reason==="not_found"?"This email is not registered.":undefined,
+          password:reason==="wrong_password"?"Incorrect password.":reason==="locked"?"Account is temporarily locked due to too many failed attempts.":reason==="inactive"?"This account has been deactivated.":(!reason||reason==="network")?"Could not reach the login service. Please try again.":undefined
+        });
+        return;
+      }
+      const session={role,email:form.email.trim(),code:result.code,token:result.token||(gid()+gid())};
+      await persistSession(session);
+      onAuthed(session);
+      return;
+    }
+
+    // ── Fallback: local-only demo mode (no Apps Script URL configured) ──
     const accounts=(await ld(accountsKey,true))||[];
     const emailNorm=form.email.trim().toLowerCase();
     const idx=accounts.findIndex(a=>a.email.toLowerCase()===emailNorm);
@@ -742,12 +812,167 @@ function SyncSettingsModal({onClose}){
           <h3 style={{fontSize:15,fontWeight:800,margin:0,color:BRAND}}>Integrations</h3>
           <button onClick={onClose} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,width:30,height:30,borderRadius:"50%",fontSize:15,fontWeight:700}}>✕</button>
         </div>
-        <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"0 0 1rem"}}>Paste the deployed Google Apps Script Web App URL that writes to your "Job Seekers" and "Applied" sheets, and sends automation/contact-request emails. Account/login data is never sent here.</p>
+        <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"0 0 1rem"}}>Paste the deployed Google Apps Script Web App URL that writes to your "Job Seekers" and "Applied" sheets, sends automation/contact-request emails, and — if implemented in your script (see Code.gs) — handles sign up / log in by reading and writing a "Users" sheet. If this is left blank, sign up / log in fall back to local-only demo storage.</p>
         <F label="Web App URL"><input style={inp} value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/…/exec"/></F>
         <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"1.25rem 0 1rem"}}>Google Sign-In requires an OAuth Client ID from Google Cloud Console with this page's origin added as an authorized JavaScript origin.</p>
         <F label="Google OAuth Client ID"><input style={inp} value={clientId} onChange={e=>setClientId(e.target.value)} placeholder="xxxxxxxxxx.apps.googleusercontent.com"/></F>
         <Btn onClick={save} style={{width:"100%",justifyContent:"center"}}>{saved?"Saved ✓":"Save"}</Btn>
       </div>
+    </div>
+  );
+}
+
+// ── ADMIN (talent pool & jobs moderation, #admin only) ────────────────────────
+function AdminPage(){
+  const [tab,setTab]=useState("candidates");
+  const [candidates,setCandidates]=useState([]);
+  const [jobs,setJobs]=useState([]);
+  const [companies,setCompanies]=useState([]);
+  const [viewing,setViewing]=useState(null); // {kind:"candidate"|"job", data}
+  const [showSync,setShowSync]=useState(false);
+  const [loading,setLoading]=useState(true);
+
+  const load=async()=>{
+    setLoading(true);
+    const [c,j,co]=await Promise.all([ld(SK.CANDIDATES,true),ld(SK.JOBS,true),ld(SK.COMPANIES,true)]);
+    setCandidates(c||[]);setJobs(j||[]);setCompanies(co||[]);
+    setLoading(false);
+  };
+  useEffect(()=>{load();},[]);
+
+  const companyName=code=>companies.find(co=>co.code===code)?.name||"—";
+
+  const deleteCandidate=async(c)=>{
+    if(!window.confirm(`Delete candidate ${c.code} (${c.position||"no title"})? This permanently removes their talent pool profile. This cannot be undone.`))return;
+    const all=(await ld(SK.CANDIDATES,true))||[];
+    await sd(SK.CANDIDATES,all.filter(x=>x.code!==c.code),true);
+    setViewing(null);
+    load();
+  };
+
+  const deleteJob=async(j)=>{
+    if(!window.confirm(`Delete job ${j.code} (${j.title||"no title"})? This permanently removes the listing. This cannot be undone.`))return;
+    const all=(await ld(SK.JOBS,true))||[];
+    await sd(SK.JOBS,all.filter(x=>x.code!==j.code),true);
+    setViewing(null);
+    load();
+  };
+
+  return(
+    <div style={{minHeight:"100vh",background:"var(--color-background-tertiary)",fontFamily:FONT}}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;500;600;700;800&display=swap');
+        input,select,textarea{font-family:'Noto Sans Khmer',sans-serif;font-size:13px;padding:8px 12px;border:0.5px solid var(--color-border-secondary);border-radius:8px;outline:none;background:var(--color-background-primary);color:var(--color-text-primary);width:100%;box-sizing:border-box;}
+      `}</style>
+      <nav style={{background:BRAND,padding:"0 2rem",display:"flex",alignItems:"center",position:"sticky",top:0,zIndex:100}}>
+        <div style={{color:"#fff",fontWeight:800,fontSize:22,letterSpacing:-1.2,marginRight:"1.5rem",paddingTop:14,paddingBottom:14,whiteSpace:"nowrap"}}>
+          <span style={{opacity:0.45,fontWeight:400}}>pair</span><span style={{fontWeight:800}}>up</span> <span style={{opacity:.7,fontWeight:600,fontSize:14}}>· Admin</span>
+        </div>
+        {[["candidates","Talent Pool","users"],["jobs","Jobs","briefcase"]].map(([id,label,icon])=>(
+          <button key={id} onClick={()=>setTab(id)} style={{background:"none",border:"none",cursor:"pointer",color:tab===id?"#fff":"rgba(255,255,255,0.58)",fontWeight:tab===id?700:400,fontSize:13,padding:"16px 14px",borderBottom:tab===id?"2px solid #7BA7F5":"2px solid transparent",display:"flex",alignItems:"center",gap:6}}>
+            <Icon name={icon} size={15}/>{label}
+          </button>
+        ))}
+        <button onClick={()=>setShowSync(true)} title="Google Sheets sync" style={{marginLeft:"auto",width:40,height:40,border:"none",background:"none",color:"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10}}>
+          <Icon name="cloud" size={19}/>
+        </button>
+        <button onClick={load} title="Refresh" style={{width:40,height:40,border:"none",background:"none",color:"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10}}>
+          <Icon name="refresh" size={18}/>
+        </button>
+      </nav>
+
+      <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem"}}>
+        <h1 style={{fontSize:24,fontWeight:800,margin:"0 0 4px",color:BRAND}}>Admin</h1>
+        <p style={{color:"var(--color-text-secondary)",fontSize:13,margin:"0 0 1.5rem"}}>View and remove any job seeker or employer listing on the platform. Deletions are permanent.</p>
+
+        {loading?(
+          <div style={{display:"flex",justifyContent:"center",padding:"4rem"}}><Icon name="loader-2" size={26} style={{color:BRAND,animation:"spin 1s linear infinite"}}/></div>
+        ):(
+        <>
+        {tab==="candidates"&&(
+          <div style={{overflowX:"auto",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead><tr style={{background:"var(--color-background-secondary)"}}>{["Code","Position","Email","Field","Location","Experience","Sharing","Created",""].map(h=><th key={h} style={{textAlign:"left",padding:"10px 12px",fontWeight:700,fontSize:11,color:"var(--color-text-secondary)",whiteSpace:"nowrap",textTransform:"uppercase",letterSpacing:.5}}>{h}</th>)}</tr></thead>
+              <tbody>
+                {candidates.map((c,i)=>(
+                  <tr key={c.code} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"var(--color-background-primary)":"var(--color-background-secondary)"}}>
+                    <td style={{padding:"10px 12px",fontFamily:"monospace",fontWeight:700,color:BRAND}}>{c.code}</td>
+                    <td style={{padding:"10px 12px",fontWeight:600}}>{c.position||"—"}</td>
+                    <td style={{padding:"10px 12px",color:"var(--color-text-secondary)"}}>{c.email||"—"}</td>
+                    <td style={{padding:"10px 12px"}}>{c.field&&<Badge color="purple">{c.field}</Badge>}</td>
+                    <td style={{padding:"10px 12px"}}>{(c.locations||[]).join(", ")}</td>
+                    <td style={{padding:"10px 12px"}}>{c.years||"—"}</td>
+                    <td style={{padding:"10px 12px"}}><Badge color={c.shareActive?"blue":"gray"}>{c.shareActive?"Public":"Private"}</Badge></td>
+                    <td style={{padding:"10px 12px",color:"var(--color-text-secondary)"}}>{fmt(c.createdAt)}</td>
+                    <td style={{padding:"10px 12px",whiteSpace:"nowrap"}}>
+                      <div style={{display:"flex",gap:6}}>
+                        <Btn variant="ghost" onClick={()=>setViewing({kind:"candidate",data:c})} style={{fontSize:11,padding:"5px 10px"}}><Icon name="eye" size={13}/></Btn>
+                        <Btn variant="danger" onClick={()=>deleteCandidate(c)} style={{fontSize:11,padding:"5px 10px"}}><Icon name="trash" size={13}/></Btn>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {candidates.length===0&&<tr><td colSpan={9} style={{padding:"2.5rem",textAlign:"center",color:"var(--color-text-secondary)"}}>No candidates in the talent pool.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {tab==="jobs"&&(
+          <div style={{overflowX:"auto",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead><tr style={{background:"var(--color-background-secondary)"}}>{["Code","Title","Company","Field","Location","Status","Posted",""].map(h=><th key={h} style={{textAlign:"left",padding:"10px 12px",fontWeight:700,fontSize:11,color:"var(--color-text-secondary)",whiteSpace:"nowrap",textTransform:"uppercase",letterSpacing:.5}}>{h}</th>)}</tr></thead>
+              <tbody>
+                {jobs.map((j,i)=>(
+                  <tr key={j.code} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"var(--color-background-primary)":"var(--color-background-secondary)"}}>
+                    <td style={{padding:"10px 12px",fontFamily:"monospace",fontWeight:700,color:BRAND}}>{j.code}</td>
+                    <td style={{padding:"10px 12px",fontWeight:600}}>{j.title||"—"}</td>
+                    <td style={{padding:"10px 12px",color:"var(--color-text-secondary)"}}>{j.company||companyName(j.companyCode)}</td>
+                    <td style={{padding:"10px 12px"}}>{j.field&&<Badge color="purple">{j.field}</Badge>}</td>
+                    <td style={{padding:"10px 12px"}}>{(j.locations||[]).join(", ")}</td>
+                    <td style={{padding:"10px 12px"}}><Badge color={j.status==="active"?"blue":"gray"}>{j.status==="active"?"Active":"Deactive"}</Badge></td>
+                    <td style={{padding:"10px 12px",color:"var(--color-text-secondary)"}}>{fmt(j.createdAt)}</td>
+                    <td style={{padding:"10px 12px",whiteSpace:"nowrap"}}>
+                      <div style={{display:"flex",gap:6}}>
+                        <Btn variant="ghost" onClick={()=>setViewing({kind:"job",data:j})} style={{fontSize:11,padding:"5px 10px"}}><Icon name="eye" size={13}/></Btn>
+                        <Btn variant="danger" onClick={()=>deleteJob(j)} style={{fontSize:11,padding:"5px 10px"}}><Icon name="trash" size={13}/></Btn>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {jobs.length===0&&<tr><td colSpan={8} style={{padding:"2.5rem",textAlign:"center",color:"var(--color-text-secondary)"}}>No jobs posted.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
+        </>
+        )}
+      </div>
+
+      {/* VIEW DETAIL MODAL */}
+      {viewing&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:"1rem"}}>
+          <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:640,maxHeight:"85vh",overflow:"auto",padding:"1.75rem"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1.25rem"}}>
+              <h3 style={{fontSize:16,fontWeight:800,margin:0,color:BRAND}}>{viewing.kind==="candidate"?`Candidate ${viewing.data.code}`:`Job ${viewing.data.code}`}</h3>
+              <button onClick={()=>setViewing(null)} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,width:30,height:30,borderRadius:"50%",fontSize:15,fontWeight:700}}>✕</button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px 20px"}}>
+              {Object.entries(viewing.data).filter(([k])=>!["recruitmentProcess","emailSettings"].includes(k)).map(([k,v])=>(
+                <div key={k} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",paddingBottom:8}}>
+                  <p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.6,margin:"0 0 3px"}}>{k}</p>
+                  <p style={{fontSize:13,margin:0,wordBreak:"break-word"}}>{typeof v==="object"?JSON.stringify(v):String(v??"—")}</p>
+                </div>
+              ))}
+            </div>
+            <div style={{marginTop:"1.5rem",display:"flex",justifyContent:"flex-end"}}>
+              <Btn variant="danger" onClick={()=>viewing.kind==="candidate"?deleteCandidate(viewing.data):deleteJob(viewing.data)}><Icon name="trash" size={14}/>Delete permanently</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showSync&&<SyncSettingsModal onClose={()=>setShowSync(false)}/>}
     </div>
   );
 }
@@ -1779,6 +2004,7 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   const [jobView,setJobView]=useState("pipeline");
   const [selectedRound,setSelectedRound]=useState("Applied");
   const [selectedApp,setSelectedApp]=useState(null);
+  const [viewingRequest,setViewingRequest]=useState(null);
 
   const load=async()=>{
     setJobsAll((await ld(SK.JOBS,true))||[]);
@@ -1791,6 +2017,22 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   // Scope this employer's own company data
   const jobs=jobsAll.filter(j=>j.companyCode===session.code);
   const requests=requestsAll.filter(r=>r.companyCode===session.code);
+
+  // ── Contact requests: candidate CV/portfolio & full contact info is revealed to
+  // the employer only ONCE, the first time an accepted request is opened. After
+  // that — even after navigating away and back, or reloading — it stays masked.
+  const openRequest=async(r)=>{
+    if(r.status==="accepted"&&!r.viewedByEmployer){
+      const all=(await ld(SK.REQUESTS,true))||[];
+      const idx=all.findIndex(x=>x.id===r.id);
+      const viewedAt=new Date().toISOString();
+      if(idx>=0){ all[idx]={...all[idx],viewedByEmployer:true,viewedAt}; await sd(SK.REQUESTS,all,true); }
+      setRequestsAll(all);
+      setViewingRequest({...r,viewedByEmployer:true,viewedAt,__firstView:true});
+    }else{
+      setViewingRequest(r);
+    }
+  };
 
   const appsForJob=code=>applications.filter(a=>a.jobCode===code);
   const currentJob=selectedJob?jobs.find(j=>j.code===selectedJob.code)||selectedJob:null;
@@ -1919,7 +2161,7 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
 
   return <div style={{maxWidth:1200,margin:"2rem auto",padding:"2rem 1rem 4rem",fontFamily:FONT}}>
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"1.5rem",gap:12}}><div><h1 style={{fontSize:26,fontWeight:800,margin:"0 0 4px"}}>Employer</h1><p style={{color:"var(--color-text-secondary)",fontSize:13,margin:0}}>{company?.name} · Manage your job postings and recruitment pipeline.</p></div><Btn onClick={()=>setPostingJob(true)}><Icon name="plus" size={15}/>Post a job</Btn></div>
-    <div style={{display:"flex",gap:4,borderBottom:"0.5px solid var(--color-border-tertiary)",marginBottom:"1.5rem"}}>{[["employer","Employer","building"],["candidates","Request pool","users"]].map(([id,label,icon])=><button key={id} onClick={()=>setTab(id)} style={{background:"none",border:"none",cursor:"pointer",padding:"11px 14px",color:tab===id?BRAND:"var(--color-text-secondary)",fontWeight:tab===id?700:400,fontFamily:FONT,fontSize:13,borderBottom:tab===id?`2px solid ${BRAND}`:"2px solid transparent",display:"flex",gap:6,alignItems:"center"}}><Icon name={icon} size={14}/>{label}</button>)}</div>
+    <div style={{display:"flex",gap:4,borderBottom:"0.5px solid var(--color-border-tertiary)",marginBottom:"1.5rem"}}>{[["employer","Employer","building"],["requests","Contact Requests","mail"],["candidates","Talent Pool","users"]].map(([id,label,icon])=><button key={id} onClick={()=>setTab(id)} style={{background:"none",border:"none",cursor:"pointer",padding:"11px 14px",color:tab===id?BRAND:"var(--color-text-secondary)",fontWeight:tab===id?700:400,fontFamily:FONT,fontSize:13,borderBottom:tab===id?`2px solid ${BRAND}`:"2px solid transparent",display:"flex",gap:6,alignItems:"center"}}><Icon name={icon} size={14}/>{label}</button>)}</div>
     {tab==="employer"&&<div>
       {company&&<Card style={{display:"flex",justifyContent:"space-between",gap:16,alignItems:"flex-start"}}>
         <div style={{display:"flex",gap:14,alignItems:"flex-start"}}>
@@ -1953,7 +2195,91 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
       </div>
     </div>}
     {tab==="company"&&company&&<div style={{maxWidth:680}}><CompanyProfilePage session={session} existing={company} onSaved={(c)=>{onCompanyUpdated&&onCompanyUpdated(c);setTab("employer");}}/></div>}
+    {tab==="requests"&&(
+      <div>
+        <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"0 0 1.25rem"}}>Requests you've sent to candidates in the Talent Pool. When a candidate accepts, their CV and portfolio links are shown here <strong>only once</strong> — after that they're hidden for privacy, so be sure to save the details.</p>
+        {requests.length===0?(
+          <div style={{textAlign:"center",padding:"3rem 1rem",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16}}>
+            <Icon name="mail-off" size={36} style={{color:BRAND_DIM,display:"block",margin:"0 auto 12px"}}/>
+            <p style={{fontWeight:700,fontSize:15,margin:"0 0 6px"}}>No contact requests sent yet</p>
+            <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>Browse the Talent Pool to reach out to candidates</p>
+          </div>
+        ):(
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {requests.map(r=>(
+              <div key={r.id} onClick={()=>openRequest(r)} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:14,padding:"1rem 1.25rem",cursor:"pointer",display:"flex",alignItems:"center",gap:14}}>
+                <div style={{width:44,height:44,borderRadius:10,background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                  <Icon name="user" size={20} style={{color:BRAND}}/>
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <p style={{fontWeight:800,fontSize:15,margin:"0 0 2px",fontFamily:"monospace",color:BRAND}}>{r.candidateCode}</p>
+                  <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{r.title}{r.salary?` · ${r.salary}`:""}</p>
+                  <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"2px 0 0"}}>Sent {fmt(r.createdAt)}</p>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6,flexShrink:0}}>
+                  <Badge color={r.status==="pending"?"amber":r.status==="accepted"?"green":"red"}>
+                    {r.status==="pending"?"Awaiting reply":r.status==="accepted"?"Accepted":"Declined"}
+                  </Badge>
+                  {r.status==="accepted"&&<Badge color={r.viewedByEmployer?"gray":"blue"}>{r.viewedByEmployer?"Contact viewed":"Contact available"}</Badge>}
+                  <Icon name="chevron-right" size={14} style={{color:"var(--color-text-secondary)"}}/>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    )}
     {tab==="candidates"&&<div style={{overflowX:"auto"}}><table style={{width:"100%",borderCollapse:"collapse",fontSize:13,fontFamily:FONT}}><thead><tr style={{background:"var(--color-background-secondary)"}}>{["Code","Position","Field","Industry","Location","Experience","Salary","Sharing","Date"].map(h=><th key={h} style={{textAlign:"left",padding:"10px 12px",fontWeight:700,fontSize:11,color:"var(--color-text-secondary)",whiteSpace:"nowrap",textTransform:"uppercase",letterSpacing:.5}}>{h}</th>)}</tr></thead><tbody>{candidates.map((c,i)=><tr key={c.code} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"var(--color-background-primary)":"var(--color-background-secondary)"}}><td style={{padding:"10px 12px",fontFamily:"monospace",fontWeight:700,fontSize:12,color:BRAND}}>{c.code}</td><td style={{padding:"10px 12px",fontWeight:500}}>{c.position}</td><td style={{padding:"10px 12px"}}>{c.field&&<Badge color="purple">{c.field}</Badge>}</td><td style={{padding:"10px 12px",color:"var(--color-text-secondary)"}}>{(c.industries||[]).join(", ")}</td><td style={{padding:"10px 12px"}}>{(c.locations||[]).join(", ")}</td><td style={{padding:"10px 12px"}}>{c.years}</td><td style={{padding:"10px 12px"}}>{c.salary||"—"}</td><td style={{padding:"10px 12px"}}><Badge color={c.shareActive?"blue":"gray"}>{c.shareActive?"Public":"Private"}</Badge></td><td style={{padding:"10px 12px",color:"var(--color-text-secondary)"}}>{fmt(c.createdAt)}</td></tr>)}{candidates.length===0&&<tr><td colSpan={9} style={{padding:"2rem",textAlign:"center",color:"var(--color-text-secondary)"}}>No candidates yet</td></tr>}</tbody></table></div>}
+
+    {/* CONTACT REQUEST DETAIL — CV/portfolio revealed only once per request */}
+    {viewingRequest&&(()=>{
+      const r=viewingRequest;
+      const candidate=candidates.find(c=>c.code===r.candidateCode);
+      const canReveal=r.status==="accepted"&&r.__firstView;
+      return(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:"1rem"}}>
+          <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:560,maxHeight:"88vh",overflow:"auto",padding:"2rem"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"1.25rem"}}>
+              <div>
+                <span style={{fontFamily:"monospace",fontWeight:700,background:BRAND_LIGHT,color:BRAND,padding:"3px 10px",borderRadius:6,fontSize:12}}>{r.candidateCode}</span>
+                <h2 style={{fontSize:19,fontWeight:800,margin:"8px 0 0",color:BRAND}}>{r.title}</h2>
+              </div>
+              <button onClick={()=>setViewingRequest(null)} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,width:32,height:32,borderRadius:"50%",fontSize:16,fontWeight:700}}>✕</button>
+            </div>
+            <Badge color={r.status==="pending"?"amber":r.status==="accepted"?"green":"red"}>
+              {r.status==="pending"?"Awaiting reply":r.status==="accepted"?"Accepted":"Declined"}
+            </Badge>
+
+            {r.status==="pending"&&<p style={{fontSize:13,color:"var(--color-text-secondary)",marginTop:"1rem"}}>This candidate hasn't responded yet. Their contact details, CV, and portfolio will appear here — once — as soon as they accept.</p>}
+            {r.status==="denied"&&<p style={{fontSize:13,color:"var(--color-text-secondary)",marginTop:"1rem"}}>This candidate declined your request. No contact information is shared.</p>}
+
+            {r.status==="accepted"&&(canReveal?(
+              <div style={{marginTop:"1.25rem"}}>
+                <div style={{background:"#FFF7E6",border:"1px solid #FFE1A8",borderRadius:10,padding:"0.875rem 1rem",marginBottom:"1.25rem",display:"flex",gap:10,alignItems:"flex-start"}}>
+                  <Icon name="alert-triangle" size={16} style={{color:"#7A5B00",flexShrink:0,marginTop:1}}/>
+                  <span style={{fontSize:12,color:"#7A5B00",lineHeight:1.5}}><strong>This is the only time this contact info will be shown.</strong> Please save it now — it will be hidden the next time you open this request.</span>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"12px 20px"}}>
+                  {[["Name",candidate?.name],["Email",candidate?.email],["Phone",candidate?.phone],["Available",candidate?.onboard]].map(([l,v])=>(
+                    <div key={l}><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>{l}</p><p style={{fontSize:13,margin:0,wordBreak:"break-word"}}>{v||"—"}</p></div>
+                  ))}
+                </div>
+                <div style={{marginTop:"1rem",display:"flex",flexDirection:"column",gap:8}}>
+                  <div><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>CV / Resume</p>{candidate?.cvLink?<a href={candidate.cvLink} target="_blank" rel="noreferrer" style={{fontSize:13,color:BRAND,wordBreak:"break-all"}}>{candidate.cvLink}</a>:<p style={{fontSize:13,margin:0,color:"var(--color-text-secondary)"}}>Not provided</p>}</div>
+                  <div><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>Portfolio</p>{candidate?.portfolio?<a href={candidate.portfolio} target="_blank" rel="noreferrer" style={{fontSize:13,color:BRAND,wordBreak:"break-all"}}>{candidate.portfolio}</a>:<p style={{fontSize:13,margin:0,color:"var(--color-text-secondary)"}}>Not provided</p>}</div>
+                </div>
+              </div>
+            ):(
+              <div style={{marginTop:"1.25rem",padding:"1.25rem",background:"var(--color-background-secondary)",borderRadius:14,textAlign:"center"}}>
+                <Icon name="lock" size={24} style={{color:BRAND_DIM}}/>
+                <p style={{fontWeight:700,fontSize:14,margin:"10px 0 4px",color:"var(--color-text-primary)"}}>Contact info already viewed</p>
+                <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}>You viewed this candidate's contact details, CV, and portfolio on {fmt(r.viewedAt)}. For the candidate's privacy, it's only shown once and can't be viewed again from here.</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    })()}
   </div>;
 }
 
@@ -2231,6 +2557,10 @@ function App(){
       <Icon name="loader-2" size={26} style={{color:BRAND,animation:"spin 1s linear infinite"}}/>
     </div>
   );
+
+  // Admin console (talent pool & jobs moderation) — accessible via #admin, no
+  // job-seeker/employer login required.
+  if(isAdmin)return <AdminPage/>;
 
   if(!role)return <RoleSelection onSelect={r=>setRole(r)}/>;
 
