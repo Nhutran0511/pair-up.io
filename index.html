@@ -98,8 +98,9 @@ async function sheetSignup(role,email,password,suggestedCode){
   if(!url) return {success:false,error:"not_configured"};
   try{
     const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"signup",role,email,password,suggestedCode})});
-    const data=await res.json();
-    return data;
+    const text=await res.text();
+    try{ return JSON.parse(text); }
+    catch(parseErr){ console.error("Sheet signup: non-JSON response",text.slice(0,300)); return {success:false,error:"bad_response",raw:text.slice(0,300)}; }
   }catch(e){ console.error("Sheet signup failed",e); return {success:false,error:"network"}; }
 }
 async function sheetLogin(role,email,password){
@@ -107,8 +108,9 @@ async function sheetLogin(role,email,password){
   if(!url) return {success:false,error:"not_configured"};
   try{
     const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"login",role,email,password})});
-    const data=await res.json();
-    return data;
+    const text=await res.text();
+    try{ return JSON.parse(text); }
+    catch(parseErr){ console.error("Sheet login: non-JSON response",text.slice(0,300)); return {success:false,error:"bad_response",raw:text.slice(0,300)}; }
   }catch(e){ console.error("Sheet login failed",e); return {success:false,error:"network"}; }
 }
 
@@ -470,7 +472,10 @@ function AuthPage({role,onAuthed,onBack}){
       const result=await sheetSignup(role,form.email.trim(),form.password,code);
       if(!result||result.success===false){
         setBusy(false);
-        setErrors({email:result&&result.error==="exists"?"Email already exists. Please log in instead.":"Could not create your account. Please try again."});
+        const reason=result&&result.error;
+        if(reason==="exists"){ setErrors({email:"Email already exists. Please log in instead."}); return; }
+        const detail=result?.message||result?.raw||reason||"unknown error";
+        setErrors({email:`Could not create your account (${detail}). Check the Apps Script URL/deployment in the Admin sync settings, or try again.`});
         return;
       }
       const session={role,email:form.email.trim(),code:result.code||code,token:result.token||(gid()+gid())};
@@ -511,10 +516,14 @@ function AuthPage({role,onAuthed,onBack}){
       setBusy(false);
       if(!result||result.success===false){
         const reason=result&&result.error;
-        setErrors({
-          email:reason==="not_found"?"This email is not registered.":undefined,
-          password:reason==="wrong_password"?"Incorrect password.":reason==="locked"?"Account is temporarily locked due to too many failed attempts.":reason==="inactive"?"This account has been deactivated.":(!reason||reason==="network")?"Could not reach the login service. Please try again.":undefined
-        });
+        if(reason==="not_found"){ setErrors({email:"This email is not registered. Please sign up first."}); return; }
+        if(reason==="wrong_password"){ setErrors({password:"Incorrect password."}); return; }
+        if(reason==="locked"){ setErrors({password:"Account is temporarily locked due to too many failed attempts. Try again later."}); return; }
+        if(reason==="inactive"){ setErrors({password:"This account has been deactivated."}); return; }
+        // Any other failure (network issue, misconfigured/undeployed Apps Script, server error,
+        // unexpected response, etc.) — always show something concrete instead of failing silently.
+        const detail=result?.message||result?.raw||reason||"unknown error";
+        setErrors({password:`Could not log you in (${detail}). Check the Apps Script URL/deployment in the Admin sync settings, or try again.`});
         return;
       }
       const session={role,email:form.email.trim(),code:result.code,token:result.token||(gid()+gid())};
@@ -1711,10 +1720,9 @@ const RECRUITMENT_ROUNDS=["Applied","Screening","Test","Interview","Offer","Onbo
 const STAGE_DESCRIPTIONS={Applied:"Application received",Screening:"Initial qualification and screening",Test:"Skills or take-home assessment",Interview:"Hiring team interview",Offer:"Offer stage",Onboard:"New hire onboarding",Rejected:"Candidate not moving forward",Pipeline:"Saved for future consideration"};
 const ROUND_REASONS=["Over qualified","Under qualified","Lack of experience","Salary","Culture","Motivation","Career Path","Others"];
 const DEFAULT_RECRUITMENT_PROCESS=RECRUITMENT_ROUNDS.map((name)=>({name,enabled:true,description:STAGE_DESCRIPTIONS[name]||""}));
-const DEFAULT_EMAIL_SETTINGS={};
 
 function PostJobPage({onBack,onSuccess,company,session}){
-  const [form,setForm]=useState({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:[],industries:[],field:"",contact:"",deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x})),emailSettings:{...DEFAULT_EMAIL_SETTINGS}});
+  const [form,setForm]=useState({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:[],industries:[],field:"",contact:"",deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))});
   const [errors,setErrors]=useState({});
   const [done,setDone]=useState(null);
   const [benefitsSaved,setBenefitsSaved]=useState(false);
@@ -1750,7 +1758,7 @@ function PostJobPage({onBack,onSuccess,company,session}){
     if(!form.contact.trim())e.contact="Required";
     if(Object.keys(e).length){setErrors(e);return;}
     const code=gjid();
-    const job={...form,code,companyCode:session?.code||null,companyEmail:session?.email||null,createdAt:new Date().toISOString(),status:"active",recruitmentProcess:form.recruitmentProcess?.length?form.recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x})),emailSettings:form.emailSettings||{...DEFAULT_EMAIL_SETTINGS}};
+    const job={...form,code,companyCode:session?.code||null,companyEmail:session?.email||null,createdAt:new Date().toISOString(),status:"active",recruitmentProcess:form.recruitmentProcess?.length?form.recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))};
     const ex=(await ld(SK.JOBS,true))||[];
     if(applyBenefitsToAll && form.benefits.trim()) await sd(BENEFITS_KEY,form.benefits);
     const jobsToSave=applyBenefitsToAll && form.benefits.trim()
@@ -1774,7 +1782,7 @@ function PostJobPage({onBack,onSuccess,company,session}){
         <p style={{fontFamily:"monospace",fontSize:36,fontWeight:800,color:BRAND,margin:0,letterSpacing:4}}>{done}</p>
       </div>
       <div style={{display:"flex",gap:10,justifyContent:"center"}}>
-        <Btn variant="outline" onClick={()=>{setDone(null);setForm({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:[],industries:[],field:"",contact:"",deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x})),emailSettings:{...DEFAULT_EMAIL_SETTINGS}});setErrors({});}}>Post another job</Btn>
+        <Btn variant="outline" onClick={()=>{setDone(null);setForm({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:[],industries:[],field:"",contact:"",deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))});setErrors({});}}>Post another job</Btn>
         <Btn onClick={onBack}>Back to dashboard</Btn>
       </div>
     </div>
@@ -2039,8 +2047,7 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
 
   const normalizeJob=j=>({
     ...j,
-    recruitmentProcess:j.recruitmentProcess?.length?j.recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x})),
-    emailSettings:{...DEFAULT_EMAIL_SETTINGS,...(j.emailSettings||{})}
+    recruitmentProcess:j.recruitmentProcess?.length?j.recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))
   });
 
   const saveJob=async(updated)=>{
@@ -2095,18 +2102,6 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
     const applicationStatus=status==="Reject"?"rejected":(status==="Pass"?"passed":"processing");
     await updateApplication(app,{currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now});
     setSelectedApp({...app,currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now});
-
-    // Automation email, if the employer configured one for the destination stage
-    const cfg=(jobNow.emailSettings||{})[nextRound];
-    if(cfg?.enabled&&(cfg.subject||cfg.body)){
-      const candidateName=app.name||app.profileSnapshot?.name||"Candidate";
-      const candidateEmail=app.email||app.profileSnapshot?.email;
-      const fill=str=>(str||"")
-        .split("{{candidateName}}").join(candidateName)
-        .split("{{jobTitle}}").join(jobNow.title||"")
-        .split("{{company}}").join(jobNow.company||"");
-      sendAutomationEmail(candidateEmail,fill(cfg.subject),fill(cfg.body));
-    }
   };
 
   const viewApplication=async app=>{
@@ -2129,7 +2124,6 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
           <Btn variant={j.status==="active"?"danger":"outline"} onClick={()=>toggleJobStatus(j)}><Icon name="power" size={14}/>{j.status==="active"?"Deactive":"Active"}</Btn>
           <Btn variant="outline" onClick={()=>setJobView("edit")}><Icon name="edit" size={14}/>Edit</Btn>
-          <Btn variant="ghost" onClick={()=>setJobView("settings")}><Icon name="settings" size={14}/>Setting</Btn>
         </div>
       </div>
 
@@ -2155,7 +2149,6 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
       </div>}
 
       {jobView==="edit"&&<JobEditPanel job={j} onSave={async updated=>{await saveJob(updated);setJobView("pipeline");}}/>}
-      {jobView==="settings"&&<EmailSettingsPanel job={j} onSave={async updated=>{await saveJob(updated);setJobView("pipeline");}}/>}
     </div>;
   }
 
@@ -2373,49 +2366,6 @@ function JobEditPanel({job,onSave}){
       <Btn variant="outline" onClick={addRound} style={{marginTop:12}}><Icon name="plus" size={14}/>Add stage</Btn>
     </Card>
     <Btn onClick={()=>onSave(form)} style={{width:"100%",justifyContent:"center",padding:"13px"}}>Save changes</Btn>
-  </div>;
-}
-
-function EmailSettingsPanel({job,onSave}){
-  const [settings,setSettings]=useState({...(job.emailSettings||{})});
-  const [addingRound,setAddingRound]=useState("");
-  const availableStages=(job.recruitmentProcess||DEFAULT_RECRUITMENT_PROCESS).map(r=>r.name);
-  const configured=Object.keys(settings);
-  const notYetAdded=availableStages.filter(r=>!configured.includes(r));
-  const update=(round,k,v)=>setSettings(s=>({...s,[round]:{...s[round],[k]:v}}));
-  const addStage=()=>{
-    if(!addingRound)return;
-    setSettings(s=>({...s,[addingRound]:{enabled:true,subject:`Update on your application — ${addingRound}`,body:`Hi {{candidateName}},\n\nThank you for your interest in {{jobTitle}}.\n\nWe would like to update you regarding the ${addingRound} stage of your application.\n\nBest regards,\n{{company}}`}}));
-    setAddingRound("");
-  };
-  const removeStage=round=>setSettings(s=>{const c={...s};delete c[round];return c;});
-  return <div>
-    <Card><SH icon="mail" title="Email response settings"/>
-      <p style={{fontSize:13,color:"var(--color-text-secondary)",marginTop:0}}>Add the recruitment stages you want to automatically email candidates for, and customize the subject/body. Use placeholders such as {"{{candidateName}}"}, {"{{jobTitle}}"}, and {"{{company}}"}.</p>
-      {configured.length===0&&<p style={{fontSize:13,color:"var(--color-text-secondary)",fontStyle:"italic",padding:"0.5rem 0 1rem"}}>No automation stages added yet — use the selector below to add one.</p>}
-      {configured.map(r=>(
-        <div key={r} style={{padding:"1rem 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <label style={{display:"flex",alignItems:"center",gap:8,fontWeight:800,fontSize:13,color:BRAND}}>
-              <input type="checkbox" checked={!!settings[r]?.enabled} onChange={e=>update(r,"enabled",e.target.checked)} style={{width:16,height:16,accentColor:BRAND}}/>{r}
-            </label>
-            <button onClick={()=>removeStage(r)} title="Remove this stage" style={{background:"none",border:"none",cursor:"pointer",color:"#E24B4A",display:"flex",alignItems:"center"}}><Icon name="trash" size={15}/></button>
-          </div>
-          <div style={{display:"grid",gap:8,marginTop:8}}>
-            <input value={settings[r]?.subject||""} onChange={e=>update(r,"subject",e.target.value)} placeholder="Email subject"/>
-            <textarea style={{...inp,minHeight:90}} value={settings[r]?.body||""} onChange={e=>update(r,"body",e.target.value)} placeholder="Email body"/>
-          </div>
-        </div>
-      ))}
-      {notYetAdded.length>0&&<div style={{display:"flex",gap:8,marginTop:configured.length?12:0,alignItems:"center",flexWrap:"wrap"}}>
-        <select value={addingRound} onChange={e=>setAddingRound(e.target.value)} style={{width:"auto",minWidth:180}}>
-          <option value="">-- Select a stage --</option>
-          {notYetAdded.map(r=><option key={r}>{r}</option>)}
-        </select>
-        <Btn variant="outline" onClick={addStage}><Icon name="plus" size={14}/>Add stage</Btn>
-      </div>}
-    </Card>
-    <Btn onClick={()=>onSave({...job,emailSettings:settings})} style={{width:"100%",justifyContent:"center",padding:"13px"}}>Save email settings</Btn>
   </div>;
 }
 
