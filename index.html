@@ -7,6 +7,8 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/bcryptjs/2.4.3/bcrypt.min.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
   <style>
     :root {
@@ -29,8 +31,19 @@ const { useState, useEffect, useCallback, useRef } = React;
 
 const BRAND="#002C76",BRAND_LIGHT="#E8EDF7",BRAND_MID="#1A3F8F",BRAND_DIM="#6B85B8";
 const FONT="'Noto Sans Khmer',sans-serif";
-const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
+const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
+// Deployed Apps Script Web App URL — baked in so every visitor (any browser,
+// any Google profile, any device) automatically uses the same Google Sheet
+// backend for sign up / log in / data sync, with no per-browser setup needed.
+// The Admin sync settings (cloud icon, #admin) can still override this locally
+// if you ever redeploy to a new URL, without needing to edit this file.
+const DEFAULT_GSHEET_URL="https://script.google.com/macros/s/AKfycbyQjEVoHPGIgWfQmDvifXPbZB_uKFTjtDEAAvVkJ7nOuLP3OxThyCKIctXMcm7sc6KtvQ/exec";
+async function getSheetUrl(){
+  const override=(await ld(GSHEET_URL_KEY,true))||"";
+  return override||DEFAULT_GSHEET_URL;
+}
+const GOOGLE_CLIENT_ID_KEY="pairup_google_client_id";
 const COMPANY_SIZES=["1–10","11–50","51–200","201–500","501–1000","1000+"];
 
 const INDUSTRIES=["Information Technology","Marketing & Communications","Finance & Banking","Retail & FMCG","Logistics & Supply Chain","Healthcare & Pharma","Education & Training","Manufacturing & Engineering","Real Estate","Game","Other"];
@@ -42,10 +55,38 @@ const YEARS_OPTS=["Fresher (0–1 yr)","1–2 years","3–5 years","5–7 years"
 const SALARY_OPTS=["Under 10M VND","10–15M VND","15–20M VND","20–30M VND","30–50M VND","50M+ VND","Negotiable"];
 const ONBOARD_OPTS=["Immediately","1 week","2 weeks","1 month","More than 1 month"];
 
+// Keys marked "shared" (3rd arg = true) are the platform's real data — candidate
+// profiles, jobs, contact requests, applications, companies, notifications.
+// These must be visible to EVERY visitor regardless of browser/device, so they
+// are mirrored to named tabs in the same Google Sheet used for auth. Local
+// storage is still written as an instant-response cache / offline fallback,
+// but the Sheet (via Apps Script) is the source of truth whenever it's reachable.
+const SHEET_MAP={
+  [SK.CANDIDATES]:{sheet:"Job Seekers",key:"code"},
+  [SK.JOBS]:{sheet:"Jobs",key:"code"},
+  [SK.REQUESTS]:{sheet:"Requests",key:"id"},
+  [SK.APPLICATIONS]:{sheet:"Applied",key:"id"},
+  [SK.COMPANIES]:{sheet:"Companies",key:"code"},
+  [SK.NOTIFS]:{sheet:"Notifications",key:"id"},
+};
+
 async function sd(k,v,s=false){
   try { localStorage.setItem(k, JSON.stringify(v)); } catch(e) { console.error(e); }
+  if(s&&SHEET_MAP[k]){
+    // Fire-and-forget: don't make the UI wait on a network round-trip for every save.
+    sheetReplaceAll(SHEET_MAP[k].sheet,Array.isArray(v)?v:[],SHEET_MAP[k].key)
+      .catch(e=>console.error(`Sheet sync failed for "${SHEET_MAP[k].sheet}"`,e));
+  }
 }
 async function ld(k,s=false){
+  if(s&&SHEET_MAP[k]){
+    const remote=await sheetList(SHEET_MAP[k].sheet);
+    if(remote!==null){
+      try{ localStorage.setItem(k,JSON.stringify(remote)); }catch(e){}
+      return remote;
+    }
+    console.warn(`Could not reach Google Sheet for "${SHEET_MAP[k].sheet}" — using local cache.`);
+  }
   try { const v=localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; }
 }
 async function nextCode(){const n=(await ld(SK.COUNTER,true))||0;const nx=n+1;await sd(SK.COUNTER,nx,true);return`#JS${String(nx).padStart(4,"0")}`;}
@@ -53,37 +94,142 @@ function gid(){return Math.random().toString(36).substring(2,10).toUpperCase();}
 function gjid(){return"JD"+Math.random().toString(36).substring(2,8).toUpperCase();}
 function fmt(iso){return iso?new Date(iso).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}):"—";}
 
-// ── GOOGLE SHEETS API ─────────────────────────────────────────────────────────
-function normalizeEmail(email){return String(email||"").trim().toLowerCase();}
-async function callSheetApi(payload){
-  const url=String((await ld(GSHEET_URL_KEY,true))||"").trim();
-  if(!url)return {success:false,error:"not_configured"};
-  let response;
+// ── GOOGLE SHEETS SYNC ────────────────────────────────────────────────────────
+// Static pages can't write to a private Google Sheet directly; a small Google Apps
+// Script deployed as a Web App acts as the bridge. Its deployed URL is baked in
+// above (DEFAULT_GSHEET_URL) so this works for every visitor automatically — no
+// per-browser setup needed. Candidate profiles, jobs, contact requests,
+// applications, companies, and notifications are all mirrored two-way ("list" to
+// read, "replace" to write) to their own tab (see SHEET_MAP above), and sign up /
+// log in read/write a "Users" tab (see sheetSignup/sheetLogin below). The sync
+// settings (cloud icon, #admin) can set a local override if you ever redeploy to
+// a new URL.
+async function sheetList(sheetName){
   try{
-    response=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(payload)});
-  }catch(error){
-    console.error("Google Sheets request failed",error);
-    return {success:false,error:"network"};
-  }
-  let data;
-  try{data=await response.json();}catch(error){
-    console.error("Google Sheets returned malformed JSON",error);
-    return {success:false,error:"malformed_response"};
-  }
-  if(!data||typeof data!=="object"||typeof data.success!=="boolean")return {success:false,error:"malformed_response"};
-  if(!response.ok&&data.success)return {success:false,error:"network"};
-  return data;
+    const url=await getSheetUrl();
+    if(!url) return null;
+    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"list",sheet:sheetName})});
+    const text=await res.text();
+    let data; try{ data=JSON.parse(text); }catch(e){ console.error(`Sheet list "${sheetName}": non-JSON response`,text.slice(0,300)); return null; }
+    if(!data||data.success===false) return null;
+    return data.rows||[];
+  }catch(e){ console.error(`Sheet list failed for "${sheetName}"`,e); return null; }
 }
-async function pushToSheet(sheetName,data){return callSheetApi({sheet:sheetName,data});}
-async function sheetSignup(role,email,password,suggestedCode){return callSheetApi({action:"signup",role,email:normalizeEmail(email),password,suggestedCode});}
-async function sheetLogin(role,email,password){return callSheetApi({action:"login",role,email:normalizeEmail(email),password});}
-function isStrongPassword(password){return !!password&&password.length>=8&&/[A-Za-z]/.test(password)&&/[0-9]/.test(password);}
-function apiErrorMessage(error,context){
-  if(error==="not_configured")return "Service not configured. An administrator must add the Google Apps Script Web App URL in #admin.";
-  if(error==="network")return `Could not reach the ${context} service. Check your connection and try again.`;
-  if(error==="malformed_response")return `The ${context} service returned an invalid response. Check the Apps Script deployment.`;
-  if(error==="server_error")return `The ${context} service encountered an error. Please try again.`;
-  return `The ${context} request could not be completed. Please try again.`;
+async function sheetReplaceAll(sheetName,rows,keyField){
+  try{
+    const url=await getSheetUrl();
+    if(!url) return false;
+    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"replace",sheet:sheetName,data:rows,keyField})});
+    const text=await res.text();
+    let data; try{ data=JSON.parse(text); }catch(e){ return false; }
+    return !!(data&&data.success);
+  }catch(e){ console.error(`Sheet replace failed for "${sheetName}"`,e); return false; }
+}
+
+async function sendAutomationEmail(to,subject,body){
+  try{
+    const url=await getSheetUrl();
+    if(!url||!to) return false;
+    await fetch(url,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"send_email",to,subject,body})});
+    return true;
+  }catch(e){ console.error("Automation email failed",e); return false; }
+}
+
+// ── AUTH VIA GOOGLE SHEET (Apps Script bridge) ────────────────────────────────
+// Flow: Frontend --POST email/password--> Apps Script --reads Google Sheet--> finds
+// email --> checks password --> returns {success, token/code} or {success:false, error}.
+// A deployed Apps Script Web App URL is baked in via DEFAULT_GSHEET_URL above, so this
+// works for every visitor automatically. The Admin sync settings (cloud icon, #admin)
+// can still set a local override, e.g. if you redeploy to a new URL.
+async function isSheetAuthConfigured(){
+  const url=await getSheetUrl();
+  return !!url;
+}
+async function sheetSignup(role,email,password,suggestedCode){
+  const url=await getSheetUrl();
+  if(!url) return {success:false,error:"not_configured"};
+  try{
+    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"signup",role,email,password,suggestedCode})});
+    const text=await res.text();
+    try{ return JSON.parse(text); }
+    catch(parseErr){ console.error("Sheet signup: non-JSON response",text.slice(0,300)); return {success:false,error:"bad_response",raw:text.slice(0,300)}; }
+  }catch(e){ console.error("Sheet signup failed",e); return {success:false,error:"network"}; }
+}
+async function sheetLogin(role,email,password){
+  const url=await getSheetUrl();
+  if(!url) return {success:false,error:"not_configured"};
+  try{
+    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"login",role,email,password})});
+    const text=await res.text();
+    try{ return JSON.parse(text); }
+    catch(parseErr){ console.error("Sheet login: non-JSON response",text.slice(0,300)); return {success:false,error:"bad_response",raw:text.slice(0,300)}; }
+  }catch(e){ console.error("Sheet login failed",e); return {success:false,error:"network"}; }
+}
+
+// ── PASSWORD HASHING ──────────────────────────────────────────────────────────
+// Uses bcrypt (via CDN) as specified in the auth flow. Falls back to a salted
+// SHA-256 digest if bcrypt failed to load (e.g. offline), so signup/login still
+// work — clearly namespaced so verifyPassword can tell which scheme was used.
+// Note: since this is a fully static, client-side app there is no server to keep
+// a signing/pepper secret on — this is demo-grade, not a production auth system.
+async function hashPassword(pw){
+  try{
+    if(window.dcodeIO&&window.dcodeIO.bcrypt){
+      return window.dcodeIO.bcrypt.hashSync(pw,10);
+    }
+  }catch(e){}
+  const enc=new TextEncoder().encode("pairup-salt::"+pw);
+  const buf=await crypto.subtle.digest("SHA-256",enc);
+  const hex=Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+  return "sha256:"+hex;
+}
+async function verifyPassword(pw,hash){
+  if(!hash)return false;
+  if(hash.startsWith("sha256:")){
+    const enc=new TextEncoder().encode("pairup-salt::"+pw);
+    const buf=await crypto.subtle.digest("SHA-256",enc);
+    const hex=Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+    return "sha256:"+hex===hash;
+  }
+  try{
+    if(window.dcodeIO&&window.dcodeIO.bcrypt) return window.dcodeIO.bcrypt.compareSync(pw,hash);
+  }catch(e){}
+  return false;
+}
+function isStrongPassword(pw){
+  return !!pw && pw.length>=8 && /[A-Za-z]/.test(pw) && /[0-9]/.test(pw);
+}
+
+// ── GOOGLE SIGN-IN ────────────────────────────────────────────────────────────
+// Uses Google Identity Services (loaded via <script> in <head>). Requires a real
+// Google Cloud OAuth Client ID configured by the site admin (via #admin settings) —
+// with no client ID configured, this simply isn't available yet. Any Google account
+// can be used; pairup only matches it against an *existing* local account by email
+// (it does not create new accounts via Google).
+function googleGetEmail(){
+  return new Promise((resolve,reject)=>{
+    (async()=>{
+      const clientId=(await ld(GOOGLE_CLIENT_ID_KEY,true))||"";
+      if(!clientId){reject(new Error("not_configured"));return;}
+      if(!window.google||!window.google.accounts||!window.google.accounts.oauth2){reject(new Error("gsi_not_loaded"));return;}
+      try{
+        const client=window.google.accounts.oauth2.initTokenClient({
+          client_id:clientId,
+          scope:"openid email profile",
+          callback:async(resp)=>{
+            if(!resp||!resp.access_token){reject(new Error("no_token"));return;}
+            try{
+              const r=await fetch("https://www.googleapis.com/oauth2/v3/userinfo",{headers:{Authorization:`Bearer ${resp.access_token}`}});
+              const info=await r.json();
+              if(info&&info.email) resolve(info.email); else reject(new Error("no_email"));
+            }catch(e){reject(e);}
+          },
+          error_callback:(err)=>reject(err||new Error("popup_failed"))
+        });
+        client.requestAccessToken();
+      }catch(e){reject(e);}
+    })();
+  });
 }
 
 const Icon=({name,size=18,style={}})=><span className={`ti ti-${name}`} style={{fontSize:size,lineHeight:1,...style}} aria-hidden="true"/>;
@@ -295,7 +441,7 @@ function AdModal({onDone}){
 }
 
 // ── NAV ───────────────────────────────────────────────────────────────────────
-function Nav({page,setPage,notifCount,role,onLogout,onDeleteAccount,onOpenNotifs}){
+function Nav({page,setPage,notifCount,role,onLogout,onDeleteAccount,onOpenSync,showSync,onOpenNotifs}){
   const tabs=role==="jobseeker"
     ?[{id:"candidate",label:"My Profile",icon:"user"},{id:"public",label:"Talent Pool",icon:"users"},{id:"jobs",label:"Jobs",icon:"briefcase"}]
     :[{id:"employer",label:"Employer",icon:"building"},{id:"public",label:"Talent Pool",icon:"users"}];
@@ -310,7 +456,10 @@ function Nav({page,setPage,notifCount,role,onLogout,onDeleteAccount,onOpenNotifs
           <Icon name={t.icon} size={15}/>{t.label}
         </button>
       ))}
-      <button onClick={onOpenNotifs} title="Notifications" aria-label="Notifications" style={{position:"relative",width:40,height:40,border:"none",background:"none",color:page==="notifications"?"#fff":"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10,marginLeft:"auto"}}>
+      {showSync&&<button onClick={onOpenSync} title="Google Sheets sync" aria-label="Sync settings" style={{marginLeft:"auto",width:40,height:40,border:"none",background:"none",color:"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10}}>
+        <Icon name="cloud" size={19}/>
+      </button>}
+      <button onClick={onOpenNotifs} title="Notifications" aria-label="Notifications" style={{position:"relative",width:40,height:40,border:"none",background:"none",color:page==="notifications"?"#fff":"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10,marginLeft:showSync?0:"auto"}}>
         <Icon name="bell" size={20}/>
         {notifCount>0&&<span style={{position:"absolute",top:2,right:1,minWidth:16,height:16,padding:"0 4px",borderRadius:99,background:"#FF6B6B",color:"#fff",fontSize:10,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center"}}>{notifCount>99?"99+":notifCount}</span>}
       </button>
@@ -332,89 +481,318 @@ function Nav({page,setPage,notifCount,role,onLogout,onDeleteAccount,onOpenNotifs
 
 // ── AUTH (SIGN UP / LOG IN) ───────────────────────────────────────────────────
 function AuthPage({role,onAuthed,onBack}){
-  const [mode,setMode]=useState("login");
+  const accountsKey=role==="jobseeker"?SK.ACCOUNTS_JS:SK.ACCOUNTS_EMP;
+  const [mode,setMode]=useState("login"); // "login" | "signup" | "forgot" | "reset"
   const [form,setForm]=useState({email:"",password:"",confirm:""});
+  const [resetForm,setResetForm]=useState({password:"",confirm:""});
+  const [resetToken,setResetToken]=useState(null); // {email,token}
+  const [forgotSent,setForgotSent]=useState(false);
   const [showPw,setShowPw]=useState(false);
   const [showPw2,setShowPw2]=useState(false);
   const [remember,setRemember]=useState(true);
   const [errors,setErrors]=useState({});
   const [notice,setNotice]=useState("");
   const [busy,setBusy]=useState(false);
-  const sf=(key,value)=>setForm(current=>({...current,[key]:value}));
+  const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const MAX_ATTEMPTS=5, LOCK_MS=15*60*1000;
 
-  const persistSession=async session=>{
+  const persistSession=async(session)=>{
     if(remember){
       await sd(SK.SESSION,{...session,expiresAt:Date.now()+7*24*60*60*1000},true);
-      try{sessionStorage.removeItem(SK.SESSION);}catch(error){}
+      try{sessionStorage.removeItem(SK.SESSION);}catch(e){}
     }else{
-      await sd(SK.SESSION,null,true);
-      try{sessionStorage.setItem(SK.SESSION,JSON.stringify(session));}catch(error){}
+      await sd(SK.SESSION,null,true); // ensure no stale 7-day session lingers
+      try{sessionStorage.setItem(SK.SESSION,JSON.stringify(session));}catch(e){}
     }
   };
-  const switchMode=nextMode=>{setMode(nextMode);setErrors({});setNotice("");};
-  const failAuth=(result,signup)=>{
-    const reason=result?.error;
-    if(reason==="exists"){setErrors({email:"Email already exists. Please log in instead."});return;}
-    if(reason==="not_found"){setErrors({email:"This email is not registered for this role."});return;}
-    if(reason==="wrong_password"){setErrors({password:"Incorrect password."});return;}
-    if(reason==="locked"){setErrors({password:"Account is temporarily locked after too many failed attempts. Please try again in 15 minutes."});return;}
-    if(reason==="inactive"){setErrors({password:"This account has been deactivated."});return;}
-    if(reason==="weak_password"){setErrors({password:"At least 8 characters, with letters and numbers"});return;}
-    if(reason==="invalid_email"){setErrors({email:"Invalid email format"});return;}
-    setNotice(apiErrorMessage(reason,signup?"signup":"login"));
-  };
+
+  const switchMode=(m)=>{setMode(m);setErrors({});setNotice("");};
+
+  // ── Sign up ──────────────────────────────────────────────────────────────
   const doSignup=async()=>{
-    const validation={};
-    const email=normalizeEmail(form.email);
-    if(!email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/))validation.email="Invalid email format";
-    if(!isStrongPassword(form.password))validation.password="At least 8 characters, with letters and numbers";
-    if(form.confirm!==form.password)validation.confirm="Passwords do not match";
-    if(Object.keys(validation).length){setErrors(validation);return;}
-    setBusy(true);setErrors({});setNotice("");
-    const suggestedCode=role==="jobseeker"?await nextCode():("CO"+gid());
-    const result=await sheetSignup(role,email,form.password,suggestedCode);
-    setBusy(false);
-    if(!result?.success){failAuth(result,true);return;}
-    const session={role,email,code:result.code||suggestedCode,token:result.token};
+    const e={};
+    if(!form.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/))e.email="Invalid email format";
+    if(!isStrongPassword(form.password))e.password="At least 8 characters, with letters and numbers";
+    if(form.confirm!==form.password)e.confirm="Passwords do not match";
+    if(Object.keys(e).length){setErrors(e);return;}
+    setBusy(true);
+    const emailNorm=form.email.trim().toLowerCase();
+
+    // ── Preferred path: Apps Script writes the new user straight into the Google Sheet ──
+    if(await isSheetAuthConfigured()){
+      const code=role==="jobseeker"?await nextCode():("CO"+gid());
+      const result=await sheetSignup(role,form.email.trim(),form.password,code);
+      if(!result||result.success===false){
+        setBusy(false);
+        const reason=result&&result.error;
+        if(reason==="exists"){ setErrors({email:"Email already exists. Please log in instead."}); return; }
+        const detail=result?.message||result?.raw||reason||"unknown error";
+        setErrors({email:`Could not create your account (${detail}). Check the Apps Script URL/deployment in the Admin sync settings, or try again.`});
+        return;
+      }
+      const session={role,email:form.email.trim(),code:result.code||code,token:result.token||(gid()+gid())};
+      await persistSession(session);
+      setBusy(false);
+      onAuthed(session);
+      return;
+    }
+
+    // ── Fallback: local-only demo mode (no Apps Script URL configured) ──
+    const accounts=(await ld(accountsKey,true))||[];
+    if(accounts.find(a=>a.email.toLowerCase()===emailNorm)){
+      setBusy(false);
+      setErrors({email:"Email already exists. Please log in instead."});
+      return;
+    }
+    const code=role==="jobseeker"?await nextCode():("CO"+gid());
+    const passwordHash=await hashPassword(form.password);
+    const account={email:form.email.trim(),passwordHash,code,createdAt:new Date().toISOString(),failedAttempts:0,lockedUntil:null,active:true};
+    await sd(accountsKey,[...accounts,account],true);
+    const session={role,email:account.email,code,token:gid()+gid()};
     await persistSession(session);
+    setBusy(false);
     onAuthed(session);
   };
+
+  // ── Log in ───────────────────────────────────────────────────────────────
   const doLogin=async()=>{
-    const validation={};
-    const email=normalizeEmail(form.email);
-    if(!email)validation.email="Required";
-    if(!form.password)validation.password="Required";
-    if(Object.keys(validation).length){setErrors(validation);return;}
-    setBusy(true);setErrors({});setNotice("");
-    const result=await sheetLogin(role,email,form.password);
-    setBusy(false);
-    if(!result?.success){failAuth(result,false);return;}
-    const session={role,email,code:result.code,token:result.token};
+    const e={};
+    if(!form.email.trim())e.email="Required";
+    if(!form.password)e.password="Required";
+    if(Object.keys(e).length){setErrors(e);return;}
+    setBusy(true);
+
+    // ── Preferred path: Apps Script reads the Google Sheet, finds the email, checks the password ──
+    if(await isSheetAuthConfigured()){
+      const result=await sheetLogin(role,form.email.trim(),form.password);
+      setBusy(false);
+      if(!result||result.success===false){
+        const reason=result&&result.error;
+        if(reason==="not_found"){ setErrors({email:"This email is not registered. Please sign up first."}); return; }
+        if(reason==="wrong_password"){ setErrors({password:"Incorrect password."}); return; }
+        if(reason==="locked"){ setErrors({password:"Account is temporarily locked due to too many failed attempts. Try again later."}); return; }
+        if(reason==="inactive"){ setErrors({password:"This account has been deactivated."}); return; }
+        // Any other failure (network issue, misconfigured/undeployed Apps Script, server error,
+        // unexpected response, etc.) — always show something concrete instead of failing silently.
+        const detail=result?.message||result?.raw||reason||"unknown error";
+        setErrors({password:`Could not log you in (${detail}). Check the Apps Script URL/deployment in the Admin sync settings, or try again.`});
+        return;
+      }
+      const session={role,email:form.email.trim(),code:result.code,token:result.token||(gid()+gid())};
+      await persistSession(session);
+      onAuthed(session);
+      return;
+    }
+
+    // ── Fallback: local-only demo mode (no Apps Script URL configured) ──
+    const accounts=(await ld(accountsKey,true))||[];
+    const emailNorm=form.email.trim().toLowerCase();
+    const idx=accounts.findIndex(a=>a.email.toLowerCase()===emailNorm);
+    if(idx===-1){
+      setBusy(false);
+      setErrors({email:"This email is not registered."});
+      return;
+    }
+    const account=accounts[idx];
+    if(account.lockedUntil&&account.lockedUntil>Date.now()){
+      setBusy(false);
+      const mins=Math.ceil((account.lockedUntil-Date.now())/60000);
+      setErrors({password:`Account is temporarily locked due to too many failed attempts. Try again in ${mins} minute${mins!==1?"s":""}.`});
+      return;
+    }
+    const ok=await verifyPassword(form.password,account.passwordHash);
+    if(!ok){
+      const updated=[...accounts];
+      const attempts=(account.failedAttempts||0)+1;
+      updated[idx]={...account,failedAttempts:attempts,lockedUntil:attempts>=MAX_ATTEMPTS?Date.now()+LOCK_MS:null};
+      await sd(accountsKey,updated,true);
+      setBusy(false);
+      setErrors({password:attempts>=MAX_ATTEMPTS?`Too many failed attempts. Account locked for 15 minutes.`:"Incorrect password."});
+      return;
+    }
+    if(account.active===false){
+      setBusy(false);
+      setErrors({password:"This account has been deactivated."});
+      return;
+    }
+    const updated=[...accounts];
+    updated[idx]={...account,failedAttempts:0,lockedUntil:null};
+    await sd(accountsKey,updated,true);
+    const session={role,email:account.email,code:account.code,token:gid()+gid()};
     await persistSession(session);
+    setBusy(false);
     onAuthed(session);
   };
-  const submit=mode==="signup"?doSignup:doLogin;
-  const onKey=event=>{if(event.key==="Enter"){event.preventDefault();submit();}};
-  const eyeBtn=(shown,toggle)=><button type="button" onClick={toggle} tabIndex={-1} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"var(--color-text-secondary)",padding:4,display:"flex"}}><Icon name={shown?"eye-off":"eye"} size={16}/></button>;
+
+  // ── Sign in with Google (matches an existing pairup account by email) ──────
+  const doGoogleSignIn=async()=>{
+    setNotice("");setErrors({});
+    setBusy(true);
+    try{
+      const email=await googleGetEmail();
+      const accounts=(await ld(accountsKey,true))||[];
+      const emailNorm=email.trim().toLowerCase();
+      const account=accounts.find(a=>a.email.toLowerCase()===emailNorm);
+      if(!account){
+        setBusy(false);
+        setNotice(`No pairup account found for ${email} under this role. Please sign up first, or make sure you selected the right role (${role==="jobseeker"?"Job Seeker":"Employer"}).`);
+        return;
+      }
+      const session={role,email:account.email,code:account.code,token:gid()+gid()};
+      await persistSession(session);
+      setBusy(false);
+      onAuthed(session);
+    }catch(err){
+      setBusy(false);
+      if(err&&err.message==="not_configured"){
+        setNotice("Google Sign-In isn't set up for this deployment yet — please use email/password.");
+      }else if(err&&err.message==="gsi_not_loaded"){
+        setNotice("Google Sign-In is still loading — please try again in a moment, or use email/password.");
+      }else{
+        setNotice("Google Sign-In was cancelled or failed. Please try again, or use email/password.");
+      }
+    }
+  };
+
+  // ── Forgot / reset password ─────────────────────────────────────────────
+  const doForgot=async()=>{
+    if(!form.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)){setErrors({email:"Invalid email format"});return;}
+    setBusy(true);
+    const accounts=(await ld(accountsKey,true))||[];
+    const emailNorm=form.email.trim().toLowerCase();
+    const idx=accounts.findIndex(a=>a.email.toLowerCase()===emailNorm);
+    let token=null;
+    if(idx!==-1){
+      token=gid()+gid();
+      const updated=[...accounts];
+      updated[idx]={...accounts[idx],resetToken:token,resetExpiresAt:Date.now()+30*60*1000};
+      await sd(accountsKey,updated,true);
+    }
+    // Always the same message, whether or not the email exists (avoids account enumeration)
+    setResetToken({email:form.email.trim(),token}); // token may be null if email wasn't found
+    setForgotSent(true);
+    setBusy(false);
+  };
+
+  const doReset=async()=>{
+    const e={};
+    if(!isStrongPassword(resetForm.password))e.password="At least 8 characters, with letters and numbers";
+    if(resetForm.confirm!==resetForm.password)e.confirm="Passwords do not match";
+    if(Object.keys(e).length){setErrors(e);return;}
+    setBusy(true);
+    const accounts=(await ld(accountsKey,true))||[];
+    const idx=accounts.findIndex(a=>a.email.toLowerCase()===(resetToken?.email||"").toLowerCase()
+      && a.resetToken && resetToken?.token && a.resetToken===resetToken.token
+      && a.resetExpiresAt && a.resetExpiresAt>Date.now());
+    if(idx===-1){
+      setBusy(false);
+      setErrors({password:"This reset link is invalid or has expired. Please request a new one."});
+      return;
+    }
+    const passwordHash=await hashPassword(resetForm.password);
+    const updated=[...accounts];
+    updated[idx]={...accounts[idx],passwordHash,resetToken:null,resetExpiresAt:null,failedAttempts:0,lockedUntil:null};
+    await sd(accountsKey,updated,true);
+    setBusy(false);
+    setNotice("Your password has been reset. Please log in.");
+    setForm({email:resetToken?.email||"",password:"",confirm:""});
+    setResetToken(null);setForgotSent(false);
+    switchMode("login");
+    setNotice("Your password has been reset. Please log in.");
+  };
+
+  const submit=mode==="signup"?doSignup:mode==="forgot"?doForgot:mode==="reset"?doReset:doLogin;
+  const onKey=e=>{ if(e.key==="Enter"){ e.preventDefault(); submit(); } };
+  const eyeBtn=(shown,toggle)=>(
+    <button type="button" onClick={toggle} tabIndex={-1} style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",cursor:"pointer",color:"var(--color-text-secondary)",padding:4,display:"flex"}}>
+      <Icon name={shown?"eye-off":"eye"} size={16}/>
+    </button>
+  );
 
   return(
     <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:"2rem",fontFamily:FONT,background:"var(--color-background-tertiary)"}}>
       <div style={{width:"100%",maxWidth:440}}>
         <button onClick={onBack} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:13,fontWeight:700,fontFamily:FONT,display:"flex",alignItems:"center",gap:6,marginBottom:"1.25rem"}}><Icon name="arrow-left" size={14}/>Back</button>
         <Card>
-          <form onSubmit={event=>{event.preventDefault();submit();}}>
-            <h2 style={{fontSize:20,fontWeight:800,margin:"0 0 10px",display:"flex",alignItems:"center",gap:8,color:"var(--color-text-primary)"}}>Welcome to <span style={{color:BRAND,fontWeight:800,letterSpacing:-0.5}}><span style={{opacity:.45,fontWeight:400}}>pair</span>up</span></h2>
-            <p style={{fontSize:12.5,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"0 0 1.25rem"}}>Authentication is securely verified by the configured Google Sheets service.</p>
+          <form onSubmit={e=>{e.preventDefault();submit();}}>
+            {mode!=="reset"&&<h2 style={{fontSize:20,fontWeight:800,margin:"0 0 10px",display:"flex",alignItems:"center",gap:8,color:"var(--color-text-primary)"}}>
+              Welcome to <span style={{color:BRAND,fontWeight:800,letterSpacing:-0.5}}><span style={{opacity:.45,fontWeight:400}}>pair</span>up</span>
+            </h2>}
+
+            {mode==="login"&&<>
+              <p style={{fontSize:12.5,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"0 0 1.25rem"}}>By signing in, you agree to pairup's <a href="#" onClick={ev=>ev.preventDefault()} style={{color:BRAND}}>Terms &amp; Conditions</a> and <a href="#" onClick={ev=>ev.preventDefault()} style={{color:BRAND}}>Privacy Policy</a> in relation to your privacy information.</p>
+              <button type="button" onClick={doGoogleSignIn} disabled={busy} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:10,padding:"12px",border:`1px solid ${BRAND}`,borderRadius:8,background:"#fff",color:BRAND,fontWeight:700,fontSize:14,cursor:"pointer",fontFamily:FONT,marginBottom:"1.25rem"}}>
+                <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.9 32.5 29.4 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l6-6C34.5 6 29.5 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.9 19 13 24 13c3.1 0 5.8 1.1 8 3l6-6C34.5 6 29.5 4 24 4c-7.7 0-14.3 4.3-17.7 10.7z"/><path fill="#4CAF50" d="M24 44c5.3 0 10.1-2 13.7-5.4l-6.3-5.3C29.4 35 26.9 36 24 36c-5.4 0-9.9-3.5-11.3-8.3l-6.6 5.1C9.6 39.7 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.9 2.6-2.7 4.8-5 6.3l6.3 5.3C39.8 36.9 44 31.1 44 24c0-1.2-.1-2.3-.4-3.5z"/></svg>
+                Sign In with Google
+              </button>
+              <div style={{display:"flex",alignItems:"center",gap:12,margin:"0 0 1.25rem",color:"var(--color-text-secondary)",fontSize:12}}>
+                <div style={{flex:1,height:1,background:"var(--color-border-tertiary)"}}/>or<div style={{flex:1,height:1,background:"var(--color-border-tertiary)"}}/>
+              </div>
+            </>}
+
             {mode==="signup"&&<p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"0 0 1.25rem"}}>{role==="jobseeker"?"One account per email address.":"One account represents one company."}</p>}
-            {notice&&<div style={{background:"#FDEAEA",color:"#8B1A1A",fontSize:12,borderRadius:8,padding:"10px 12px",marginBottom:"1rem"}}>{notice}</div>}
-            <F label="Email" error={errors.email} required><input style={inp} type="email" value={form.email} onChange={event=>sf("email",event.target.value)} onKeyDown={onKey} placeholder="Email" autoComplete="email"/></F>
-            <F label="Password" error={errors.password} required>
-              <div style={{position:"relative"}}><input style={{...inp,paddingRight:36}} type={showPw?"text":"password"} value={form.password} onChange={event=>sf("password",event.target.value)} onKeyDown={onKey} placeholder="Password" autoComplete={mode==="signup"?"new-password":"current-password"}/>{eyeBtn(showPw,()=>setShowPw(value=>!value))}</div>
-            </F>
-            {mode==="signup"&&<F label="Confirm Password" error={errors.confirm} required><div style={{position:"relative"}}><input style={{...inp,paddingRight:36}} type={showPw2?"text":"password"} value={form.confirm} onChange={event=>sf("confirm",event.target.value)} onKeyDown={onKey} placeholder="Confirm Password" autoComplete="new-password"/>{eyeBtn(showPw2,()=>setShowPw2(value=>!value))}</div></F>}
-            <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"var(--color-text-primary)",cursor:"pointer",margin:"4px 0 4px"}}><input type="checkbox" checked={remember} onChange={event=>setRemember(event.target.checked)} style={{width:16,height:16,accentColor:BRAND}}/>Remember me for 7 days</label>
-            <Btn onClick={submit} disabled={busy} style={{width:"100%",justifyContent:"center",padding:"13px",marginTop:8,fontSize:14}}>{busy?"Please wait…":(mode==="signup"?"Sign Up":"Sign In")}</Btn>
-            <p style={{fontSize:13,color:"var(--color-text-primary)",textAlign:"center",marginTop:16,marginBottom:0}}>{mode==="login"?<>Do not have an account? <button type="button" onClick={()=>switchMode("signup")} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontWeight:700,fontFamily:FONT,fontSize:13,padding:0}}>Sign up now!</button></>:<>Already have an account? <button type="button" onClick={()=>switchMode("login")} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontWeight:700,fontFamily:FONT,fontSize:13,padding:0}}>Log in</button></>}</p>
+
+            {notice&&mode!=="reset"&&!forgotSent&&<div style={{background:BRAND_LIGHT,color:BRAND,fontSize:12,borderRadius:8,padding:"10px 12px",marginBottom:"1rem"}}>{notice}</div>}
+
+            {(mode==="login"||mode==="signup")&&<>
+              <F label="Email" error={errors.email} required><input style={inp} type="email" value={form.email} onChange={e=>sf("email",e.target.value)} onKeyDown={onKey} placeholder="Email"/></F>
+              <F label={<span style={{display:"flex",justifyContent:"space-between",width:"100%"}}><span>Password <span style={{color:"#E24B4A"}}>*</span></span>{mode==="login"&&<button type="button" onClick={()=>{switchMode("forgot");setForgotSent(false);}} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:12,fontWeight:700,fontFamily:FONT,padding:0}}>Forgot password?</button>}</span>} error={errors.password} noAsterisk>
+                <div style={{position:"relative"}}>
+                  <input style={{...inp,paddingRight:36}} type={showPw?"text":"password"} value={form.password} onChange={e=>sf("password",e.target.value)} onKeyDown={onKey} placeholder="Password"/>
+                  {eyeBtn(showPw,()=>setShowPw(v=>!v))}
+                </div>
+              </F>
+              {mode==="signup"&&<F label="Confirm Password" error={errors.confirm} required>
+                <div style={{position:"relative"}}>
+                  <input style={{...inp,paddingRight:36}} type={showPw2?"text":"password"} value={form.confirm} onChange={e=>sf("confirm",e.target.value)} onKeyDown={onKey} placeholder="Confirm Password"/>
+                  {eyeBtn(showPw2,()=>setShowPw2(v=>!v))}
+                </div>
+              </F>}
+              <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"var(--color-text-primary)",cursor:"pointer",margin:"4px 0 4px"}}>
+                <input type="checkbox" checked={remember} onChange={e=>setRemember(e.target.checked)} style={{width:16,height:16,accentColor:BRAND}}/>
+                Remember me for 7 days
+              </label>
+              <Btn onClick={submit} disabled={busy} style={{width:"100%",justifyContent:"center",padding:"13px",marginTop:8,fontSize:14}}>{busy?"Please wait…":(mode==="signup"?"Sign Up":"Sign In with Email")}</Btn>
+              <p style={{fontSize:13,color:"var(--color-text-primary)",textAlign:"center",marginTop:16,marginBottom:0}}>
+                {mode==="login"
+                  ?<>Do not have an account? <button type="button" onClick={()=>switchMode("signup")} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontWeight:700,fontFamily:FONT,fontSize:13,padding:0}}>Sign up now!</button></>
+                  :<>Already have an account? <button type="button" onClick={()=>switchMode("login")} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontWeight:700,fontFamily:FONT,fontSize:13,padding:0}}>Log in</button></>}
+              </p>
+            </>}
+
+            {mode==="forgot"&&<>
+              {!forgotSent?(<>
+                <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"0 0 1rem"}}>Enter your email and we'll help you reset your password.</p>
+                <F label="Email" error={errors.email} required><input style={inp} type="email" value={form.email} onChange={e=>sf("email",e.target.value)} onKeyDown={onKey} placeholder="Email"/></F>
+                <Btn onClick={submit} disabled={busy} style={{width:"100%",justifyContent:"center",padding:"13px",marginTop:6}}>{busy?"Please wait…":"Send reset instructions"}</Btn>
+              </>):(<>
+                <div style={{background:BRAND_LIGHT,color:BRAND,borderRadius:10,padding:"1rem",fontSize:13,lineHeight:1.6,marginBottom:"1rem"}}>If an account with that email exists, password reset instructions have been sent.</div>
+                <div style={{background:"#FFF7E6",border:"1px solid #FFE1A8",borderRadius:10,padding:"1rem",fontSize:12,lineHeight:1.6,color:"#7A5B00"}}>
+                  <strong>Demo mode:</strong> no email service is connected here, so instead of emailing the link, you can continue directly.
+                  <button type="button" onClick={()=>switchMode("reset")} style={{display:"block",marginTop:8,background:BRAND,color:"#fff",border:"none",borderRadius:8,padding:"9px 14px",cursor:"pointer",fontWeight:700,fontFamily:FONT,fontSize:12}}>Continue to reset password →</button>
+                </div>
+              </>)}
+              <p style={{fontSize:13,color:"var(--color-text-primary)",textAlign:"center",marginTop:16,marginBottom:0}}>
+                <button type="button" onClick={()=>{switchMode("login");setForgotSent(false);}} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontWeight:700,fontFamily:FONT,fontSize:13,padding:0}}>← Back to log in</button>
+              </p>
+            </>}
+
+            {mode==="reset"&&<>
+              <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"0 0 1rem"}}>Choose a new password for your account.</p>
+              <F label="New Password" error={errors.password} required>
+                <div style={{position:"relative"}}>
+                  <input style={{...inp,paddingRight:36}} type={showPw?"text":"password"} value={resetForm.password} onChange={e=>setResetForm(f=>({...f,password:e.target.value}))} onKeyDown={onKey} placeholder="New password"/>
+                  {eyeBtn(showPw,()=>setShowPw(v=>!v))}
+                </div>
+              </F>
+              <F label="Confirm New Password" error={errors.confirm} required>
+                <div style={{position:"relative"}}>
+                  <input style={{...inp,paddingRight:36}} type={showPw2?"text":"password"} value={resetForm.confirm} onChange={e=>setResetForm(f=>({...f,confirm:e.target.value}))} onKeyDown={onKey} placeholder="Confirm new password"/>
+                  {eyeBtn(showPw2,()=>setShowPw2(v=>!v))}
+                </div>
+              </F>
+              <Btn onClick={submit} disabled={busy} style={{width:"100%",justifyContent:"center",padding:"13px",marginTop:6}}>{busy?"Please wait…":"Reset password"}</Btn>
+            </>}
           </form>
         </Card>
       </div>
@@ -477,15 +855,29 @@ function CompanyProfilePage({session,onSaved,existing}){
 // ── SYNC SETTINGS (Google Sheets bridge URL) ──────────────────────────────────
 function SyncSettingsModal({onClose}){
   const [url,setUrl]=useState("");
+  const [clientId,setClientId]=useState("");
   const [saved,setSaved]=useState(false);
-  useEffect(()=>{ld(GSHEET_URL_KEY,true).then(value=>setUrl(value||""));},[]);
-  const save=async()=>{await sd(GSHEET_URL_KEY,url.trim(),true);setSaved(true);setTimeout(()=>setSaved(false),1800);};
+  useEffect(()=>{
+    ld(GSHEET_URL_KEY,true).then(u=>setUrl(u||""));
+    ld(GOOGLE_CLIENT_ID_KEY,true).then(c=>setClientId(c||""));
+  },[]);
+  const save=async()=>{
+    await sd(GSHEET_URL_KEY,url.trim(),true);
+    await sd(GOOGLE_CLIENT_ID_KEY,clientId.trim(),true);
+    setSaved(true);setTimeout(()=>setSaved(false),1800);
+  };
   return(
     <div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",zIndex:600,display:"flex",alignItems:"center",justifyContent:"center",padding:"1rem"}}>
       <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:520,padding:"1.75rem",fontFamily:FONT}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1rem"}}><h3 style={{fontSize:15,fontWeight:800,margin:0,color:BRAND}}>Google Sheets service</h3><button onClick={onClose} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,width:30,height:30,borderRadius:"50%",fontSize:15,fontWeight:700}}>✕</button></div>
-        <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"0 0 1rem"}}>Enter the deployed Google Apps Script Web App URL used for authoritative account authentication and Google Sheets profile/application sync. The URL must end in <strong>/exec</strong>.</p>
-        <F label="Web App URL"><input style={inp} value={url} onChange={event=>setUrl(event.target.value)} placeholder="https://script.google.com/macros/s/…/exec"/></F>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1rem"}}>
+          <h3 style={{fontSize:15,fontWeight:800,margin:0,color:BRAND}}>Integrations</h3>
+          <button onClick={onClose} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,width:30,height:30,borderRadius:"50%",fontSize:15,fontWeight:700}}>✕</button>
+        </div>
+        <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"0 0 1rem"}}>The app already ships with a deployed Apps Script Web App URL baked in, so sign up / log in / data sync work for every visitor out of the box — no per-browser setup needed. Only fill this in if you've deployed a <em>new</em> Apps Script URL and want to override the built-in one (e.g. after redeploying). Leave blank to keep using the built-in URL.</p>
+        <F label="Web App URL override (optional)"><input style={inp} value={url} onChange={e=>setUrl(e.target.value)} placeholder={DEFAULT_GSHEET_URL}/></F>
+        <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"-0.5rem 0 1rem",wordBreak:"break-all"}}>Currently active: {url.trim()||DEFAULT_GSHEET_URL}</p>
+        <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"1.25rem 0 1rem"}}>Google Sign-In requires an OAuth Client ID from Google Cloud Console with this page's origin added as an authorized JavaScript origin.</p>
+        <F label="Google OAuth Client ID"><input style={inp} value={clientId} onChange={e=>setClientId(e.target.value)} placeholder="xxxxxxxxxx.apps.googleusercontent.com"/></F>
         <Btn onClick={save} style={{width:"100%",justifyContent:"center"}}>{saved?"Saved ✓":"Save"}</Btn>
       </div>
     </div>
@@ -628,7 +1020,7 @@ function AdminPage(){
               <button onClick={()=>setViewing(null)} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,width:30,height:30,borderRadius:"50%",fontSize:15,fontWeight:700}}>✕</button>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px 20px"}}>
-              {Object.entries(viewing.data).filter(([k])=>k!=="recruitmentProcess").map(([k,v])=>(
+              {Object.entries(viewing.data).filter(([k])=>!["recruitmentProcess","emailSettings"].includes(k)).map(([k,v])=>(
                 <div key={k} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",paddingBottom:8}}>
                   <p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.6,margin:"0 0 3px"}}>{k}</p>
                   <p style={{fontSize:13,margin:0,wordBreak:"break-word"}}>{typeof v==="object"?JSON.stringify(v):String(v??"—")}</p>
@@ -688,8 +1080,6 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
   const [shareOn,setShareOn]=useState(false);
   const [appliedJobs,setAppliedJobs]=useState([]);
   const [profileEvents,setProfileEvents]=useState([]);
-  const [saving,setSaving]=useState(false);
-  const [saveError,setSaveError]=useState("");
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
 
   // Load profile from storage once
@@ -741,34 +1131,28 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
 
   const openEdit=()=>{
     const s=profile||{};
-    setForm({name:s.name||"",email:session.email,phone:s.phone||"",social:s.social||"",position:s.position||"",field:s.field||"",locations:s.locations||[],industries:s.industries||[],skills:s.skills||"",years:s.years||"",languages:s.languages||[],intro:s.intro||"",onboard:s.onboard||"",salary:s.salary||"",portfolio:s.portfolio||"",cvLink:s.cvLink||"",consentPool:s.shareActive||false,consentStore:!!s.code});
+    setForm({name:s.name||"",email:s.email||"",phone:s.phone||"",social:s.social||"",position:s.position||"",field:s.field||"",locations:s.locations||[],industries:s.industries||[],skills:s.skills||"",years:s.years||"",languages:s.languages||[],intro:s.intro||"",onboard:s.onboard||"",salary:s.salary||"",portfolio:s.portfolio||"",cvLink:s.cvLink||"",consentPool:s.shareActive||false,consentStore:!!s.code});
     setErrors({});setMode("edit");
   };
 
   const doToggleShare=async(val)=>{
     if(!profile){openEdit();return;}
-    setSaveError("");
-    const u={...profile,email:session.email,shareActive:val,consentPool:val,updatedAt:new Date().toISOString()};
-    const result=await pushToSheet("job seekers",u);
-    if(!result.success){setSaveError(apiErrorMessage(result.error,"profile sync"));return;}
+    const u={...profile,shareActive:val,consentPool:val};
     await persist(u);setShareOn(val);setProfile(u);onSubmit();
   };
 
-  const saveProfile=async(isNew)=>{
-    const validation=validate();if(Object.keys(validation).length){setErrors(validation);return;}
-    setSaving(true);setSaveError("");
-    const now=new Date().toISOString();
-    const candidate=isNew
-      ?{...form,email:session.email,code:session.code,createdAt:now,status:"active",shareActive:form.consentPool}
-      :{...profile,...form,email:session.email,updatedAt:now,shareActive:form.consentPool};
-    const result=await pushToSheet("job seekers",candidate);
-    if(!result.success){setSaving(false);setSaveError(apiErrorMessage(result.error,"profile sync"));return;}
-    await persist(candidate);
-    setProfile(candidate);setShareOn(form.consentPool);setSaving(false);onSubmit();
-    if(isNew)setSubmitted(candidate.code);else setMode("view");
+  const doSubmit=async()=>{
+    const e=validate();if(Object.keys(e).length){setErrors(e);return;}
+    const code=session.code;
+    const c={...form,code,createdAt:new Date().toISOString(),status:"active",shareActive:form.consentPool};
+    await persist(c);setProfile(c);setShareOn(form.consentPool);setSubmitted(code);onSubmit();
   };
-  const doSubmit=()=>saveProfile(true);
-  const doUpdate=()=>saveProfile(false);
+
+  const doUpdate=async()=>{
+    const e=validate();if(Object.keys(e).length){setErrors(e);return;}
+    const c={...profile,...form,updatedAt:new Date().toISOString(),shareActive:form.consentPool};
+    await persist(c);setProfile(c);setMode("view");onSubmit();
+  };
 
   const doRespond=async(req,action)=>{
     const all=(await ld(SK.REQUESTS,true))||[];
@@ -875,7 +1259,7 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
         <SH icon="user-circle" title="Personal Information"/>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
           <F label="Full name" error={errors.name} required><input style={inp} value={form.name} onChange={e=>sf("name",e.target.value)} placeholder="Jane Smith"/></F>
-          <F label="Email" error={errors.email} required><input style={{...inp,background:"var(--color-background-secondary)",cursor:"not-allowed"}} type="email" value={session.email} readOnly/></F>
+          <F label="Email" error={errors.email} required><input style={inp} type="email" value={form.email} onChange={e=>sf("email",e.target.value)} placeholder="jane@example.com"/></F>
           <F label="Phone" error={errors.phone} required><input style={inp} value={form.phone} onChange={e=>sf("phone",e.target.value)} placeholder="+84 9xx xxx xxx"/></F>
           <F label="Social links (Facebook, LinkedIn…)"><input style={inp} value={form.social} onChange={e=>sf("social",e.target.value)} placeholder="https://linkedin.com/in/…"/></F>
         </div>
@@ -953,9 +1337,8 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
         </div>
       </Card>
 
-      {saveError&&<div role="alert" style={{background:"#FDEAEA",color:"#8B1A1A",fontSize:12,borderRadius:8,padding:"10px 12px",marginBottom:"1rem"}}>{saveError}</div>}
-      <Btn onClick={profile?doUpdate:doSubmit} disabled={saving} style={{width:"100%",justifyContent:"center",fontSize:15,padding:"14px"}}>
-        {saving?"Saving to Google Sheets…":(profile?"Save changes →":"Submit profile →")}
+      <Btn onClick={profile?doUpdate:doSubmit} style={{width:"100%",justifyContent:"center",fontSize:15,padding:"14px"}}>
+        {profile?"Save changes →":"Submit profile →"}
       </Btn>
     </div>
   );
@@ -1240,6 +1623,13 @@ function PublicPage({onRequest,session,company}){
     const notifs=(await ld(SK.NOTIFS,true))||[];
     notifs.push({id:gid(),type:"contact_request",to:selected.code,company:reqForm.company,title:reqForm.title,message:`${reqForm.company} has sent you a contact request for the role of ${reqForm.title}`,detail:req,createdAt:new Date().toISOString(),read:false});
     await sd(SK.NOTIFS,notifs,true);
+    if(selected.email){
+      sendAutomationEmail(
+        selected.email,
+        `${reqForm.company} wants to connect with you about ${reqForm.title}`,
+        `Hi ${selected.name||"there"},\n\n${reqForm.company} found your profile in the pairup Talent Pool and would like to connect with you about the ${reqForm.title} role.\n\n${reqForm.jd}\n\n${reqForm.salary?`Salary range: ${reqForm.salary}\n`:""}${reqForm.benefits?`Benefits: ${reqForm.benefits}\n`:""}\nContact: ${reqForm.contactName} (${reqForm.contactEmail}${reqForm.contactPhone?`, ${reqForm.contactPhone}`:""})\n\nLog in to pairup to review and respond to this request.\n\nBest regards,\n${reqForm.company}`
+      );
+    }
     setReqSent(true);onRequest();
   };
 
@@ -1525,8 +1915,6 @@ function JobsPage({onApply,session}){
   const [submitted,setSubmitted]=useState(false);
   const [alreadyApplied,setAlreadyApplied]=useState(false);
   const [appliedCodes,setAppliedCodes]=useState(new Set());
-  const [applying,setApplying]=useState(false);
-  const [applyError,setApplyError]=useState("");
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
 
   const load=async()=>{
@@ -1553,13 +1941,13 @@ function JobsPage({onApply,session}){
   );
 
   const openJob=async(j)=>{
-    setSelected(j);setSubmitted(false);setErrors({});setApplyError("");
+    setSelected(j);setSubmitted(false);setErrors({});
     const profile=await ld("pairup_my_profile_"+session.email);
     const applications=(await ld(SK.APPLICATIONS,true))||[];
     const existing=applications.find(a=>a.jobCode===j.code && (a.candidateCode===session.code||(profile?.email&&a.email===profile.email)));
     setAlreadyApplied(!!existing);
     setForm({
-      name:profile?.name||"",email:session.email,phone:profile?.phone||"",
+      name:profile?.name||"",email:profile?.email||session.email,phone:profile?.phone||"",
       cvLink:profile?.cvLink||"",portfolio:profile?.portfolio||"",salary:profile?.salary||"",
       onboard:profile?.onboard||"",consent:false
     });
@@ -1580,15 +1968,12 @@ function JobsPage({onApply,session}){
     const existing=(await ld(SK.APPLICATIONS,true))||[];
     const duplicate=existing.find(a=>a.jobCode===selected.code && (a.candidateCode===session.code||(a.email===form.email)));
     if(duplicate){setAlreadyApplied(true);setAppliedCodes(prev=>new Set([...prev,selected.code]));return;}
-    setApplying(true);setApplyError("");
-    const application={id:gid(),jobCode:selected.code,jobTitle:selected.title,company:selected.company,companyEmail:selected.companyEmail||null,candidateCode:session.code,profileSnapshot:profile||null,...form,email:session.email,createdAt:new Date().toISOString(),status:"applied",profileEvents:[]};
-    const result=await pushToSheet("Applied",application);
-    if(!result.success){setApplying(false);setApplyError(apiErrorMessage(result.error,"application sync"));return;}
+    const application={id:gid(),jobCode:selected.code,jobTitle:selected.title,company:selected.company,companyEmail:selected.companyEmail||null,candidateCode:session.code,profileSnapshot:profile||null,...form,createdAt:new Date().toISOString(),status:"applied",profileEvents:[]};
     await sd(SK.APPLICATIONS,[...existing,application],true);
     const notifs=(await ld(SK.NOTIFS,true))||[];
     notifs.push({id:gid(),type:"application",to:selected.companyEmail||"employer",message:`New application for ${selected.title} at ${selected.company}`,title:selected.title,company:selected.company,applicationId:application.id,candidateCode:application.candidateCode,createdAt:new Date().toISOString(),read:false});
     await sd(SK.NOTIFS,notifs,true);
-    setApplying(false);setAlreadyApplied(true);setAppliedCodes(prev=>new Set([...prev,selected.code]));setSubmitted(true);onApply();
+    setAlreadyApplied(true);setAppliedCodes(prev=>new Set([...prev,selected.code]));setSubmitted(true);onApply();
   };
 
   return(
@@ -1636,9 +2021,9 @@ function JobsPage({onApply,session}){
             <div>
               <Card><h3 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"0 0 10px"}}>Job Description</h3><p style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.summary||""}}/><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.description||""}}/><h4 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"1rem 0 8px"}}>Requirements</h4><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.requirements||""}}/>{selected.benefits&&<><h4 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"1rem 0 8px"}}>Benefits</h4><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:0}} dangerouslySetInnerHTML={{__html:selected.benefits||""}}/></>}</Card>
               {alreadyApplied||submitted?<div style={{textAlign:"center",background:BRAND_LIGHT,borderRadius:14,padding:"2rem"}}><Icon name="check-circle" size={36} style={{color:BRAND}}/><h3 style={{color:BRAND,margin:"8px 0"}}>{submitted?"Application submitted!":"Applied"}</h3><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{submitted?`You've successfully applied for ${selected.title}. You can track its status under "Applied Jobs".`:"You have already applied for this position."}</p></div>:(<>
-                <Card><SH icon="user-circle" title="Apply for this position"/><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}><F label="Full name" error={errors.name} required><input style={inp} value={form.name} onChange={e=>sf("name",e.target.value)}/></F><F label="Email" error={errors.email} required><input style={{...inp,background:"var(--color-background-secondary)",cursor:"not-allowed"}} type="email" value={session.email} readOnly/></F><F label="Phone number" error={errors.phone} required><input style={inp} value={form.phone} onChange={e=>sf("phone",e.target.value)}/></F><F label="CV link" error={errors.cvLink} required><input style={inp} type="url" value={form.cvLink} onChange={e=>sf("cvLink",e.target.value)} placeholder="https://..."/></F><F label="Portfolio link"><input style={inp} type="url" value={form.portfolio} onChange={e=>sf("portfolio",e.target.value)} placeholder="https://..."/></F><F label="Salary expected" error={errors.salary} required><input style={inp} value={form.salary} onChange={e=>sf("salary",e.target.value)} placeholder="e.g. 35M VND/month"/></F><F label="Available to start" error={errors.onboard} required><select style={inp} value={form.onboard} onChange={e=>sf("onboard",e.target.value)}><option value="">-- Select --</option>{ONBOARD_OPTS.map(o=><option key={o}>{o}</option>)}</select></F></div></Card>
+                <Card><SH icon="user-circle" title="Apply for this position"/><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}><F label="Full name" error={errors.name} required><input style={inp} value={form.name} onChange={e=>sf("name",e.target.value)}/></F><F label="Email" error={errors.email} required><input style={inp} type="email" value={form.email} onChange={e=>sf("email",e.target.value)}/></F><F label="Phone number" error={errors.phone} required><input style={inp} value={form.phone} onChange={e=>sf("phone",e.target.value)}/></F><F label="CV link" error={errors.cvLink} required><input style={inp} type="url" value={form.cvLink} onChange={e=>sf("cvLink",e.target.value)} placeholder="https://..."/></F><F label="Portfolio link"><input style={inp} type="url" value={form.portfolio} onChange={e=>sf("portfolio",e.target.value)} placeholder="https://..."/></F><F label="Salary expected" error={errors.salary} required><input style={inp} value={form.salary} onChange={e=>sf("salary",e.target.value)} placeholder="e.g. 35M VND/month"/></F><F label="Available to start" error={errors.onboard} required><select style={inp} value={form.onboard} onChange={e=>sf("onboard",e.target.value)}><option value="">-- Select --</option>{ONBOARD_OPTS.map(o=><option key={o}>{o}</option>)}</select></F></div></Card>
                 <label style={{display:"flex",alignItems:"flex-start",gap:10,padding:"1rem",background:"#F8F9FB",borderRadius:10,border:`1px solid ${form.consent?BRAND:"var(--color-border-tertiary)"}`,cursor:"pointer",marginBottom:"1rem"}}><input type="checkbox" checked={form.consent} onChange={e=>sf("consent",e.target.checked)} style={{marginTop:3,accentColor:BRAND,width:16,height:16,flexShrink:0}}/><span style={{fontSize:12,color:"var(--color-text-primary)",lineHeight:1.6}}>I agree that my personal information and application details may be stored and processed for this job application. This consent is required to apply.</span></label>{errors.consent&&<p style={{fontSize:11,color:"#E24B4A",margin:"-6px 0 10px"}}>{errors.consent}</p>}
-                {applyError&&<div style={{background:"#FDEAEA",color:"#8B1A1A",fontSize:12,borderRadius:8,padding:"10px 12px",marginBottom:"1rem"}}>{applyError}</div>}<Btn onClick={apply} disabled={applying} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"13px"}}>{applying?"Submitting to Google Sheets…":"Apply →"}</Btn>
+                <Btn onClick={apply} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"13px"}}>Apply →</Btn>
               </>)}
             </div>
             <div>
@@ -1710,7 +2095,10 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   const appsForJob=code=>applications.filter(a=>a.jobCode===code);
   const currentJob=selectedJob?jobs.find(j=>j.code===selectedJob.code)||selectedJob:null;
 
-  const normalizeJob=j=>({...j,recruitmentProcess:j.recruitmentProcess?.length?j.recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))});
+  const normalizeJob=j=>({
+    ...j,
+    recruitmentProcess:j.recruitmentProcess?.length?j.recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))
+  });
 
   const saveJob=async(updated)=>{
     const all=(await ld(SK.JOBS,true))||[];
@@ -1764,7 +2152,6 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
     const applicationStatus=status==="Reject"?"rejected":(status==="Pass"?"passed":"processing");
     await updateApplication(app,{currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now});
     setSelectedApp({...app,currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now});
-
   };
 
   const viewApplication=async app=>{
@@ -2091,6 +2478,7 @@ function App(){
   const [prevPage,setPrevPage]=useState("candidate");
   const [refresh,setRefresh]=useState(0);
   const [notifCount,setNotifCount]=useState(0);
+  const [showSync,setShowSync]=useState(false);
   const isAdmin=typeof window!=="undefined"&&window.location.hash==="#admin";
   const bump=useCallback(()=>setRefresh(r=>r+1),[]);
 
@@ -2147,7 +2535,21 @@ function App(){
   };
 
   const deleteAccount=async()=>{
-    window.alert("Account deletion is not available in this deployment. Please contact the administrator to deactivate or remove the account in the users sheet.");
+    if(!window.confirm("This will permanently delete your account and profile data. This cannot be undone. Continue?"))return;
+    if(session.role==="jobseeker"){
+      const accounts=((await ld(SK.ACCOUNTS_JS,true))||[]).filter(a=>a.email.toLowerCase()!==session.email.toLowerCase());
+      await sd(SK.ACCOUNTS_JS,accounts,true);
+      await sd("pairup_my_profile_"+session.email,null,true);
+      const candidates=((await ld(SK.CANDIDATES,true))||[]).filter(c=>c.code!==session.code);
+      await sd(SK.CANDIDATES,candidates,true);
+    }else{
+      const accounts=((await ld(SK.ACCOUNTS_EMP,true))||[]).filter(a=>a.email.toLowerCase()!==session.email.toLowerCase());
+      await sd(SK.ACCOUNTS_EMP,accounts,true);
+      const companies=((await ld(SK.COMPANIES,true))||[]).filter(c=>c.code!==session.code);
+      await sd(SK.COMPANIES,companies,true);
+    }
+    await clearSession();
+    setSession(null);setRole(null);setCompany(null);setCompanyChecked(false);
   };
 
   if(booting)return(
@@ -2183,12 +2585,13 @@ function App(){
         input:focus,select:focus,textarea:focus{border-color:${BRAND};box-shadow:0 0 0 3px ${BRAND}18;}
         select{width:auto;}
       `}</style>
-      <Nav page={page} setPage={setPage} notifCount={notifCount} role={role} onLogout={logout} onDeleteAccount={deleteAccount} onOpenNotifs={openNotifs}/>
+      <Nav page={page} setPage={setPage} notifCount={notifCount} role={role} onLogout={logout} onDeleteAccount={deleteAccount} onOpenSync={()=>setShowSync(true)} showSync={isAdmin} onOpenNotifs={openNotifs}/>
       {page==="candidate"&&role==="jobseeker"&&<CandidatePage onSubmit={bump} refresh={refresh} session={session}/>}
       {page==="public"&&<PublicPage onRequest={bump} session={session} company={company}/>}
       {page==="jobs"&&role==="jobseeker"&&<JobsPage onApply={bump} session={session}/>}
       {page==="employer"&&role==="employer"&&<EmployerPage onPost={bump} refresh={refresh} session={session} company={company} onCompanyUpdated={setCompany}/>}
       {page==="notifications"&&<NotificationsPage onRefresh={bump} role={role} session={session} onBack={()=>setPage(prevPage)}/>}
+      {showSync&&<SyncSettingsModal onClose={()=>setShowSync(false)}/>}
     </div>
   );
 }
