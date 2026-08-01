@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-02-notif-debug";
+const APP_BUILD="2026-08-02-notif-debug2";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -2686,7 +2686,8 @@ function App(){
           :(x.to?.toLowerCase?.()===session.email?.toLowerCase()||x.to==="employer"||x.to==="all");
       });
       const unreadCount=relevant.filter(x=>!x.read).length;
-      console.log("[pairup notif check]",{session:session?{role:session.role,code:session.code,email:session.email}:null,totalNotifs:n.length,matchedForMe:relevant.length,unread:unreadCount,allTo:n.map(x=>({to:x.to,read:x.read,type:x.type}))});
+      console.log(`[pairup notif check] role=${session?.role} code=${session?.code} email=${session?.email} | total=${n.length} matched=${relevant.length} unread=${unreadCount}`);
+      console.log("[pairup notif check] all notif 'to' values:",n.map(x=>`to=${x.to} read=${x.read} type=${x.type}`).join(" | "));
       setNotifCount(unreadCount);
     };
     checkNotifs();
