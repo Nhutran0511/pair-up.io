@@ -78,9 +78,9 @@ async function sd(k,v,s=false){
       .catch(e=>console.error(`Sheet sync failed for "${SHEET_MAP[k].sheet}"`,e));
   }
 }
-async function ld(k,s=false){
+async function ld(k,s=false,fresh=false){
   if(s&&SHEET_MAP[k]){
-    const remote=await sheetList(SHEET_MAP[k].sheet);
+    const remote=await sheetList(SHEET_MAP[k].sheet,fresh);
     if(remote!==null){
       try{ localStorage.setItem(k,JSON.stringify(remote)); }catch(e){}
       return remote;
@@ -95,9 +95,12 @@ async function ld(k,s=false){
 // Sheet was unreachable AND there's no local cache" as "the table is empty" —
 // then the very next save would overwrite the real Google Sheet data with an
 // empty array, permanently erasing everyone else's records. This helper makes
-// that failure explicit and aborts the write instead.
+// that failure explicit and aborts the write instead. It also always bypasses
+// the short-lived read cache (bypass="fresh"), since writing back a value that
+// was cached even a couple seconds ago could silently undo a very recent change
+// made by someone else.
 async function ldForWrite(key){
-  const v=await ld(key,true);
+  const v=await ld(key,true,true);
   if(v===null){
     alert("Could not reach the shared data (Google Sheet). Nothing was saved, to avoid erasing existing data — please check your connection and try again.");
     return null;
@@ -119,21 +122,38 @@ function fmt(iso){return iso?new Date(iso).toLocaleDateString("en-GB",{day:"2-di
 // log in read/write a "Users" tab (see sheetSignup/sheetLogin below). The sync
 // settings (cloud icon, #admin) can set a local override if you ever redeploy to
 // a new URL.
-async function sheetList(sheetName){
-  try{
-    const url=await getSheetUrl();
-    if(!url) return null;
-    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"list",sheet:sheetName})});
-    const text=await res.text();
-    let data; try{ data=JSON.parse(text); }catch(e){ console.error(`Sheet list "${sheetName}": non-JSON response`,text.slice(0,300)); return null; }
-    // Only trust an explicit rows array. If the deployed Apps Script is an older
-    // version that doesn't understand action:"list" yet, it will still often
-    // reply {success:true} with no "rows" field — treating that as "0 rows" would
-    // silently wipe out real data on the next save, so we treat it as a failure
-    // (falls back to the local cache) instead.
-    if(!data||data.success===false||!Array.isArray(data.rows)) return null;
-    return data.rows;
-  }catch(e){ console.error(`Sheet list failed for "${sheetName}"`,e); return null; }
+// Several components often ask for the same sheet within moments of each other
+// (e.g. every page load fires 3-4 "list" calls). Without this, each one would
+// independently hit the network, which is what was making everything feel slow.
+// This dedupes concurrent requests for the same sheet into a single round-trip,
+// and keeps that result fresh for a few seconds so a burst of reads (e.g. a page
+// with several components mounting at once) only costs one network call.
+const SHEET_CACHE_TTL_MS=4000;
+const _sheetCache={}; // sheetName -> {ts, promise}
+async function sheetList(sheetName,fresh=false){
+  const now=Date.now();
+  if(!fresh){
+    const cached=_sheetCache[sheetName];
+    if(cached&&(now-cached.ts)<SHEET_CACHE_TTL_MS) return cached.promise;
+  }
+  const promise=(async()=>{
+    try{
+      const url=await getSheetUrl();
+      if(!url) return null;
+      const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"list",sheet:sheetName})});
+      const text=await res.text();
+      let data; try{ data=JSON.parse(text); }catch(e){ console.error(`Sheet list "${sheetName}": non-JSON response`,text.slice(0,300)); return null; }
+      // Only trust an explicit rows array. If the deployed Apps Script is an older
+      // version that doesn't understand action:"list" yet, it will still often
+      // reply {success:true} with no "rows" field — treating that as "0 rows" would
+      // silently wipe out real data on the next save, so we treat it as a failure
+      // (falls back to the local cache) instead.
+      if(!data||data.success===false||!Array.isArray(data.rows)) return null;
+      return data.rows;
+    }catch(e){ console.error(`Sheet list failed for "${sheetName}"`,e); return null; }
+  })();
+  _sheetCache[sheetName]={ts:now,promise};
+  return promise;
 }
 async function sheetReplaceAll(sheetName,rows,keyField){
   try{
@@ -142,6 +162,7 @@ async function sheetReplaceAll(sheetName,rows,keyField){
     const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"replace",sheet:sheetName,data:rows,keyField})});
     const text=await res.text();
     let data; try{ data=JSON.parse(text); }catch(e){ return false; }
+    delete _sheetCache[sheetName]; // this sheet just changed — next read must be fresh
     return !!(data&&data.success);
   }catch(e){ console.error(`Sheet replace failed for "${sheetName}"`,e); return false; }
 }
@@ -550,7 +571,7 @@ function AuthPage({role,onAuthed,onBack}){
         setErrors({email:`Could not create your account (${detail}). Check the Apps Script URL/deployment in the Admin sync settings, or try again.`});
         return;
       }
-      const session={role,email:form.email.trim(),code:result.code||code,token:result.token||(gid()+gid())};
+      const session={role,email:form.email.trim().toLowerCase(),code:result.code||code,token:result.token||(gid()+gid())};
       await persistSession(session);
       setBusy(false);
       onAuthed(session);
@@ -598,7 +619,7 @@ function AuthPage({role,onAuthed,onBack}){
         setErrors({password:`Could not log you in (${detail}). Check the Apps Script URL/deployment in the Admin sync settings, or try again.`});
         return;
       }
-      const session={role,email:form.email.trim(),code:result.code,token:result.token||(gid()+gid())};
+      const session={role,email:form.email.trim().toLowerCase(),code:result.code,token:result.token||(gid()+gid())};
       await persistSession(session);
       onAuthed(session);
       return;
@@ -880,6 +901,9 @@ function SyncSettingsModal({onClose}){
   const [saved,setSaved]=useState(false);
   const [testing,setTesting]=useState(false);
   const [testResults,setTestResults]=useState(null); // [{sheet, ok, message}]
+  const [testEmail,setTestEmail]=useState("");
+  const [emailTesting,setEmailTesting]=useState(false);
+  const [emailResult,setEmailResult]=useState(null); // {ok, message}
   useEffect(()=>{
     ld(GSHEET_URL_KEY,true).then(u=>setUrl(u||""));
     ld(GOOGLE_CLIENT_ID_KEY,true).then(c=>setClientId(c||""));
@@ -909,6 +933,29 @@ function SyncSettingsModal({onClose}){
     setTestResults(results);
     setTesting(false);
   };
+  const sendTestEmail=async()=>{
+    if(!testEmail.trim())return;
+    setEmailTesting(true);setEmailResult(null);
+    try{
+      const activeUrl=url.trim()||DEFAULT_GSHEET_URL;
+      // Unlike the real send_email calls in the app (fire-and-forget, mode:"no-cors",
+      // so failures are invisible), this reads the actual JSON response so we can
+      // tell whether MailApp is actually authorized/working.
+      const res=await fetch(activeUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"send_email",to:testEmail.trim(),subject:"pairup test email",body:"If you received this, email sending from Apps Script is working correctly."})});
+      const text=await res.text();
+      let data;
+      try{ data=JSON.parse(text); }
+      catch(e){ setEmailResult({ok:false,message:"Didn't return JSON — outdated deployment or wrong URL."}); setEmailTesting(false); return; }
+      if(!data||data.success===false){
+        setEmailResult({ok:false,message:`Apps Script error: ${data?.error||"unknown"}${data?.message?" — "+data.message:""}. This is usually because MailApp hasn't been authorized yet — in the Apps Script editor, open Code.gs, pick any function in the dropdown, click Run once, and approve the Gmail permission when prompted.`});
+      }else{
+        setEmailResult({ok:true,message:"Request accepted by Apps Script — check the inbox (and spam folder) of the test address."});
+      }
+    }catch(e){
+      setEmailResult({ok:false,message:"Network error — could not reach this URL at all."});
+    }
+    setEmailTesting(false);
+  };
   return(
     <div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",zIndex:600,display:"flex",alignItems:"center",justifyContent:"center",padding:"1rem"}}>
       <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:520,padding:"1.75rem",fontFamily:FONT}}>
@@ -928,6 +975,14 @@ function SyncSettingsModal({onClose}){
               </div>
             ))}
           </div>
+        )}
+        <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"1.25rem 0 1rem"}}>Test whether Apps Script can actually send email (used for contact-request notifications to candidates). If contact-request emails aren't arriving, test here first.</p>
+        <div style={{display:"flex",gap:8,marginBottom:8}}>
+          <input style={{...inp,flex:1}} value={testEmail} onChange={e=>setTestEmail(e.target.value)} placeholder="your-email@example.com" type="email"/>
+          <Btn variant="outline" onClick={sendTestEmail} disabled={emailTesting||!testEmail.trim()} style={{whiteSpace:"nowrap"}}>{emailTesting?"Sending…":"Send test email"}</Btn>
+        </div>
+        {emailResult&&(
+          <div style={{background:emailResult.ok?"#E9F7EE":"#FFF1F0",border:`1px solid ${emailResult.ok?"#B7E4C7":"#FFC9C6"}`,borderRadius:10,padding:"0.6rem 0.9rem",marginBottom:"1.25rem",fontSize:12,color:emailResult.ok?"#1E6B3A":"#8A2A26",lineHeight:1.5}}>{emailResult.message}</div>
         )}
         <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"1.25rem 0 1rem"}}>Google Sign-In requires an OAuth Client ID from Google Cloud Console with this page's origin added as an authorized JavaScript origin.</p>
         <F label="Google OAuth Client ID"><input style={inp} value={clientId} onChange={e=>setClientId(e.target.value)} placeholder="xxxxxxxxxx.apps.googleusercontent.com"/></F>
@@ -1855,17 +1910,30 @@ function PostJobPage({onBack,onSuccess,company,session}){
   const ti=(i)=>setForm(f=>({...f,industries:f.industries.includes(i)?f.industries.filter(x=>x!==i):[...f.industries,i]}));
 
   useEffect(()=>{
-    // Load saved benefits if any
-    ld(BENEFITS_KEY).then(b=>{if(b){setForm(f=>({...f,benefits:b}));setBenefitsSaved(true);}});
+    // Prefer the employer's synced benefits template (works from any device/browser);
+    // fall back to the local cache for instant same-tab reuse.
+    (async()=>{
+      let b=company?.savedBenefits;
+      if(!b) b=await ld(BENEFITS_KEY);
+      if(b){setForm(f=>({...f,benefits:b}));setBenefitsSaved(true);}
+    })();
   },[]);
 
   const useSameBenefits=async()=>{
-    const saved=await ld(BENEFITS_KEY);
+    let saved=company?.savedBenefits;
+    if(!saved) saved=await ld(BENEFITS_KEY);
     if(saved){setForm(f=>({...f,benefits:saved}));setBenefitsSaved(true);}
   };
 
   const saveBenefits=async()=>{
-    await sd(BENEFITS_KEY,form.benefits);setBenefitsSaved(true);
+    await sd(BENEFITS_KEY,form.benefits); // instant local cache
+    setBenefitsSaved(true);
+    if(session?.code){
+      const all=await ldForWrite(SK.COMPANIES);
+      if(all===null)return; // network hiccup — local cache above still works for this tab
+      const idx=all.findIndex(c=>c.code===session.code);
+      if(idx>=0){ all[idx]={...all[idx],savedBenefits:form.benefits}; await sd(SK.COMPANIES,all,true); }
+    }
   };
 
   const submit=async()=>{
@@ -1992,16 +2060,15 @@ function JobsPage({onApply,session}){
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
 
   const load=async()=>{
-    const d=(await ld(SK.JOBS,true))||[];
-    setJobs(d.filter(j=>j.status==="active"));
-    setCompanies((await ld(SK.COMPANIES,true))||[]);
+    const [d,co]=await Promise.all([ld(SK.JOBS,true),ld(SK.COMPANIES,true)]);
+    setJobs((d||[]).filter(j=>j.status==="active"));
+    setCompanies(co||[]);
   };
   useEffect(()=>{
     load();
     (async()=>{
-      const profile=await ld("pairup_my_profile_"+session.email);
-      const apps=(await ld(SK.APPLICATIONS,true))||[];
-      setAppliedCodes(new Set(apps.filter(a=>a.candidateCode===session.code||(profile?.email&&a.email===profile.email)).map(a=>a.jobCode)));
+      const[profile,apps]=await Promise.all([ld("pairup_my_profile_"+session.email),ld(SK.APPLICATIONS,true)]);
+      setAppliedCodes(new Set((apps||[]).filter(a=>a.candidateCode===session.code||(profile?.email&&a.email===profile.email)).map(a=>a.jobCode)));
     })();
     const iv=setInterval(load,10000); // keep the list fresh as employers post/reactivate jobs
     return ()=>clearInterval(iv);
@@ -2141,10 +2208,11 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   const [viewingRequest,setViewingRequest]=useState(null);
 
   const load=async()=>{
-    setJobsAll((await ld(SK.JOBS,true))||[]);
-    setRequestsAll((await ld(SK.REQUESTS,true))||[]);
-    setApplications((await ld(SK.APPLICATIONS,true))||[]);
-    setCandidates((await ld(SK.CANDIDATES,true))||[]);
+    const[jobsD,reqD,appsD,candD]=await Promise.all([ld(SK.JOBS,true),ld(SK.REQUESTS,true),ld(SK.APPLICATIONS,true),ld(SK.CANDIDATES,true)]);
+    setJobsAll(jobsD||[]);
+    setRequestsAll(reqD||[]);
+    setApplications(appsD||[]);
+    setCandidates(candD||[]);
   };
   useEffect(()=>{load();},[refresh]);
 
@@ -2511,7 +2579,7 @@ function NotificationsPage({onRefresh,role,session,onBack}){
       const all=((await ld(SK.NOTIFS,true))||[]).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
       const scoped=all.filter(x=>role==="jobseeker"
         ?(x.to===session?.code||x.to==="jobseeker"||x.to==="all")
-        :(x.to===session?.email||x.to==="employer"||x.to==="all"));
+        :(x.to?.toLowerCase?.()===session?.email?.toLowerCase()||x.to==="employer"||x.to==="all"));
       setNotifs(scoped);
       const unread=scoped.filter(n=>!n.read);
       if(unread.length){
@@ -2591,16 +2659,23 @@ function App(){
     }
   },[session,refresh]);
 
-  useEffect(()=>{(async()=>{
-    const n=(await ld(SK.NOTIFS,true))||[];
-    const relevant=n.filter(x=>{
-      if(!session)return false;
-      return session.role==="jobseeker"
-        ?(x.to===session.code||x.to==="jobseeker"||x.to==="all")
-        :(x.to===session.email||x.to==="employer"||x.to==="all");
-    });
-    setNotifCount(relevant.filter(x=>!x.read).length);
-  })();},[refresh,session]);
+  useEffect(()=>{
+    const checkNotifs=async()=>{
+      const n=(await ld(SK.NOTIFS,true))||[];
+      const relevant=n.filter(x=>{
+        if(!session)return false;
+        return session.role==="jobseeker"
+          ?(x.to===session.code||x.to==="jobseeker"||x.to==="all")
+          :(x.to?.toLowerCase?.()===session.email?.toLowerCase()||x.to==="employer"||x.to==="all");
+      });
+      setNotifCount(relevant.filter(x=>!x.read).length);
+    };
+    checkNotifs();
+    // Poll so new notifications created by someone else (a different browser/
+    // device) show up on their own, without the person needing to refresh.
+    const interval=setInterval(checkNotifs,20000);
+    return ()=>clearInterval(interval);
+  },[refresh,session]);
 
   const openNotifs=()=>{ if(page!=="notifications"){ setPrevPage(page); setPage("notifications"); } };
 
