@@ -31,6 +31,10 @@ const { useState, useEffect, useCallback, useRef } = React;
 
 const BRAND="#002C76",BRAND_LIGHT="#E8EDF7",BRAND_MID="#1A3F8F",BRAND_DIM="#6B85B8";
 const FONT="'Noto Sans Khmer',sans-serif";
+// Bump this string with every meaningful update. Visible in the Admin page
+// footer so it's easy to confirm a deployment is actually running the latest
+// code (vs. a stale cached/old file on hosting).
+const APP_BUILD="2026-08-02-rte-fix";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -1055,7 +1059,8 @@ function AdminPage(){
 
       <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem"}}>
         <h1 style={{fontSize:24,fontWeight:800,margin:"0 0 4px",color:BRAND}}>Admin</h1>
-        <p style={{color:"var(--color-text-secondary)",fontSize:13,margin:"0 0 1.5rem"}}>View and remove any job seeker or employer listing on the platform. Deletions are permanent.</p>
+        <p style={{color:"var(--color-text-secondary)",fontSize:13,margin:"0 0 4px"}}>View and remove any job seeker or employer listing on the platform. Deletions are permanent.</p>
+        <p style={{color:"var(--color-text-secondary)",fontSize:11,margin:"0 0 1.5rem",fontFamily:"monospace"}}>Build: {APP_BUILD}</p>
 
         {loading?(
           <div style={{display:"flex",justifyContent:"center",padding:"4rem"}}><Icon name="loader-2" size={26} style={{color:BRAND,animation:"spin 1s linear infinite"}}/></div>
@@ -2508,17 +2513,29 @@ function StageAction({app,round,onSave,canNext}){
 
 function RichTextEditor({value,onChange,minHeight=140}){
   const ref=useRef(null);
-  const initialized=useRef(false);
+  // Tracks the last value the DOM is known to hold — either what we just typed
+  // (echoed back via onChange→value on the next render) or what we just set
+  // programmatically. Only re-sync innerHTML when `value` differs from that,
+  // i.e. an EXTERNAL change (like "Use same as before" loading saved benefits).
+  // Without this guard, typing would fight the cursor on every keystroke; the
+  // previous "set innerHTML once on mount only" version instead had the
+  // opposite bug — external updates arriving after mount were silently ignored.
+  const lastKnown=useRef(null);
   useEffect(()=>{
-    if(!initialized.current && ref.current){
+    if(ref.current && value!==lastKnown.current){
       ref.current.innerHTML=value||"";
-      initialized.current=true;
+      lastKnown.current=value||"";
     }
-  },[]);
+  },[value]);
+  const emit=()=>{
+    if(!ref.current)return;
+    lastKnown.current=ref.current.innerHTML;
+    onChange(ref.current.innerHTML);
+  };
   const exec=(cmd,arg)=>{
     if(ref.current) ref.current.focus();
     document.execCommand(cmd,false,arg);
-    if(ref.current) onChange(ref.current.innerHTML);
+    emit();
   };
   const tools=[["bold","bold","Bold"],["italic","italic","Italic"],["underline","underline","Underline"],["insertUnorderedList","list","Bullet list"],["insertOrderedList","list-numbers","Numbered list"]];
   return <div>
@@ -2536,7 +2553,7 @@ function RichTextEditor({value,onChange,minHeight=140}){
         <option value="7">Huge</option>
       </select>
     </div>
-    <div ref={ref} contentEditable suppressContentEditableWarning onInput={e=>onChange(e.currentTarget.innerHTML)} style={{minHeight,padding:"10px 12px",border:"0.5px solid var(--color-border-secondary)",borderRadius:8,fontFamily:FONT,fontSize:13,background:"var(--color-background-primary)",outline:"none",overflowY:"auto",lineHeight:1.6}}/>
+    <div ref={ref} contentEditable suppressContentEditableWarning onInput={emit} style={{minHeight,padding:"10px 12px",border:"0.5px solid var(--color-border-secondary)",borderRadius:8,fontFamily:FONT,fontSize:13,background:"var(--color-background-primary)",outline:"none",overflowY:"auto",lineHeight:1.6}}/>
   </div>;
 }
 
