@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-02-notif-debug2";
+const APP_BUILD="2026-08-02-employer-jobs-tab";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -169,6 +169,51 @@ async function sheetReplaceAll(sheetName,rows,keyField){
     delete _sheetCache[sheetName]; // this sheet just changed — next read must be fresh
     return !!(data&&data.success);
   }catch(e){ console.error(`Sheet replace failed for "${sheetName}"`,e); return false; }
+}
+
+// Batches several "list" reads into ONE HTTP round-trip. Each parallel-but-separate
+// ld() call still pays Apps Script's own per-request startup cost even when fired
+// concurrently — this cuts a page that needs e.g. Jobs+Requests+Applied+Job Seekers
+// down to a single request instead of four. Individual sheetList() calls for the
+// same sheets (from elsewhere on the page) transparently share this same result via
+// the existing _sheetCache.
+async function sheetListMulti(sheetNames){
+  const now=Date.now();
+  const needed=sheetNames.filter(name=>{
+    const cached=_sheetCache[name];
+    return !(cached&&(now-cached.ts)<SHEET_CACHE_TTL_MS);
+  });
+  if(needed.length){
+    const batchPromise=(async()=>{
+      try{
+        const url=await getSheetUrl();
+        if(!url) return null;
+        const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"list_multi",sheets:needed})});
+        const text=await res.text();
+        let data; try{ data=JSON.parse(text); }catch(e){ console.error("list_multi non-JSON response",text.slice(0,300)); return null; }
+        if(!data||data.success===false||!data.data) return null;
+        return data.data; // {sheetName: rows}
+      }catch(e){ console.error("list_multi failed",e); return null; }
+    })();
+    needed.forEach(name=>{
+      _sheetCache[name]={ts:now,promise:batchPromise.then(d=>(d&&Array.isArray(d[name]))?d[name]:null)};
+    });
+  }
+  const result={};
+  await Promise.all(sheetNames.map(async name=>{ result[name]=await sheetList(name); }));
+  return result;
+}
+
+// Read several SK.* keys at once (mix of shared/synced and plain local keys),
+// using sheetListMulti under the hood for anything that needs a network fetch.
+// Returns a plain object keyed by whatever you passed in, e.g.
+// const {jobs,requests}=await ldMany({jobs:SK.JOBS,requests:SK.REQUESTS});
+async function ldMany(keyMap){
+  const sharedSheets=[...new Set(Object.values(keyMap).filter(k=>SHEET_MAP[k]).map(k=>SHEET_MAP[k].sheet))];
+  if(sharedSheets.length) await sheetListMulti(sharedSheets);
+  const result={};
+  await Promise.all(Object.entries(keyMap).map(async([name,key])=>{ result[name]=await ld(key,true); }));
+  return result;
 }
 
 async function sendAutomationEmail(to,subject,body){
@@ -489,7 +534,7 @@ function AdModal({onDone}){
 function Nav({page,setPage,notifCount,role,onLogout,onDeleteAccount,onOpenSync,showSync,onOpenNotifs}){
   const tabs=role==="jobseeker"
     ?[{id:"candidate",label:"My Profile",icon:"user"},{id:"public",label:"Talent Pool",icon:"users"},{id:"jobs",label:"Jobs",icon:"briefcase"}]
-    :[{id:"employer",label:"Employer",icon:"building"},{id:"public",label:"Talent Pool",icon:"users"}];
+    :[{id:"employer",label:"Employer",icon:"building"},{id:"public",label:"Talent Pool",icon:"users"},{id:"jobs",label:"Jobs",icon:"briefcase"}];
   const [showMenu,setShowMenu]=useState(false);
   return(
     <nav style={{background:BRAND,padding:"0 2rem",display:"flex",alignItems:"center",position:"sticky",top:0,zIndex:100,fontFamily:FONT}}>
@@ -996,6 +1041,61 @@ function SyncSettingsModal({onClose}){
   );
 }
 
+// ── ADMIN ACCESS GATE ──────────────────────────────────────────────────────
+// The password itself is never stored in this file — it's checked server-side
+// via Apps Script (action:"admin_auth"), which compares against a Script
+// Property only the deployer can set. Unlocking is remembered only for this
+// browser tab's session (sessionStorage), so it doesn't persist across tabs
+// or after the browser fully closes.
+const ADMIN_UNLOCK_KEY="pairup_admin_unlocked";
+function AdminGate(){
+  const [unlocked,setUnlocked]=useState(()=>{
+    try{ return sessionStorage.getItem(ADMIN_UNLOCK_KEY)==="1"; }catch(e){ return false; }
+  });
+  const [password,setPassword]=useState("");
+  const [error,setError]=useState("");
+  const [busy,setBusy]=useState(false);
+
+  const submit=async(e)=>{
+    e.preventDefault();
+    if(!password.trim())return;
+    setBusy(true);setError("");
+    try{
+      const url=await getSheetUrl();
+      const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"admin_auth",password})});
+      const text=await res.text();
+      let data; try{ data=JSON.parse(text); }catch(e2){ setError("Could not verify — the Apps Script deployment may be outdated.");setBusy(false);return; }
+      if(data&&data.success){
+        try{ sessionStorage.setItem(ADMIN_UNLOCK_KEY,"1"); }catch(e2){}
+        setUnlocked(true);
+      }else if(data&&data.error==="not_configured"){
+        setError("No admin password has been set yet. Run setAdminPassword() once in the Apps Script editor first.");
+      }else{
+        setError("Incorrect password.");
+      }
+    }catch(e2){
+      setError("Could not reach the server. Check your connection and try again.");
+    }
+    setBusy(false);
+  };
+
+  if(unlocked)return <AdminPage/>;
+
+  return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--color-background-tertiary)",fontFamily:FONT}}>
+      <form onSubmit={submit} style={{background:"#fff",borderRadius:20,padding:"2.25rem",width:"100%",maxWidth:360}}>
+        <div style={{fontWeight:800,fontSize:20,letterSpacing:-1,marginBottom:4,color:BRAND}}>
+          <span style={{opacity:0.45,fontWeight:400}}>pair</span><span>up</span> <span style={{opacity:.7,fontWeight:600,fontSize:13}}>· Admin</span>
+        </div>
+        <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"0 0 1.25rem"}}>Enter the admin password to continue.</p>
+        <input autoFocus type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" style={{...inp,marginBottom:10}}/>
+        {error&&<p style={{fontSize:12,color:"#C0392B",margin:"0 0 12px"}}>{error}</p>}
+        <Btn style={{width:"100%",justifyContent:"center"}} disabled={busy}>{busy?"Checking…":"Unlock"}</Btn>
+      </form>
+    </div>
+  );
+}
+
 // ── ADMIN (talent pool & jobs moderation, #admin only) ────────────────────────
 function AdminPage(){
   const [tab,setTab]=useState("candidates");
@@ -1008,7 +1108,7 @@ function AdminPage(){
 
   const load=async()=>{
     setLoading(true);
-    const [c,j,co]=await Promise.all([ld(SK.CANDIDATES,true),ld(SK.JOBS,true),ld(SK.COMPANIES,true)]);
+    const {c,j,co}=await ldMany({c:SK.CANDIDATES,j:SK.JOBS,co:SK.COMPANIES});
     setCandidates(c||[]);setJobs(j||[]);setCompanies(co||[]);
     setLoading(false);
   };
@@ -2065,16 +2165,19 @@ function JobsPage({onApply,session}){
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
 
   const load=async()=>{
-    const [d,co]=await Promise.all([ld(SK.JOBS,true),ld(SK.COMPANIES,true)]);
+    const {d,co}=await ldMany({d:SK.JOBS,co:SK.COMPANIES});
     setJobs((d||[]).filter(j=>j.status==="active"));
     setCompanies(co||[]);
   };
   useEffect(()=>{
     load();
-    (async()=>{
-      const[profile,apps]=await Promise.all([ld("pairup_my_profile_"+session.email),ld(SK.APPLICATIONS,true)]);
-      setAppliedCodes(new Set((apps||[]).filter(a=>a.candidateCode===session.code||(profile?.email&&a.email===profile.email)).map(a=>a.jobCode)));
-    })();
+    if(session.role==="jobseeker"){
+      (async()=>{
+        const profile=await ld("pairup_my_profile_"+session.email);
+        const {apps}=await ldMany({apps:SK.APPLICATIONS});
+        setAppliedCodes(new Set((apps||[]).filter(a=>a.candidateCode===session.code||(profile?.email&&a.email===profile.email)).map(a=>a.jobCode)));
+      })();
+    }
     const iv=setInterval(load,10000); // keep the list fresh as employers post/reactivate jobs
     return ()=>clearInterval(iv);
   },[]);
@@ -2088,6 +2191,7 @@ function JobsPage({onApply,session}){
 
   const openJob=async(j)=>{
     setSelected(j);setSubmitted(false);setErrors({});
+    if(session.role!=="jobseeker")return;
     const profile=await ld("pairup_my_profile_"+session.email);
     const applications=(await ld(SK.APPLICATIONS,true))||[];
     const existing=applications.find(a=>a.jobCode===j.code && (a.candidateCode===session.code||(profile?.email&&a.email===profile.email)));
@@ -2168,7 +2272,12 @@ function JobsPage({onApply,session}){
           <div style={{display:"grid",gridTemplateColumns:"1fr 280px",gap:"1.5rem",alignItems:"start"}}>
             <div>
               <Card><h3 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"0 0 10px"}}>Job Description</h3><p style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.summary||""}}/><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.description||""}}/><h4 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"1rem 0 8px"}}>Requirements</h4><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.requirements||""}}/>{selected.benefits&&<><h4 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"1rem 0 8px"}}>Benefits</h4><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:0}} dangerouslySetInnerHTML={{__html:selected.benefits||""}}/></>}</Card>
-              {alreadyApplied||submitted?<div style={{textAlign:"center",background:BRAND_LIGHT,borderRadius:14,padding:"2rem"}}><Icon name="check-circle" size={36} style={{color:BRAND}}/><h3 style={{color:BRAND,margin:"8px 0"}}>{submitted?"Application submitted!":"Applied"}</h3><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{submitted?`You've successfully applied for ${selected.title}. You can track its status under "Applied Jobs".`:"You have already applied for this position."}</p></div>:(<>
+              {session.role!=="jobseeker"?(
+                <div style={{textAlign:"center",background:"var(--color-background-secondary)",borderRadius:14,padding:"1.5rem"}}>
+                  <Icon name="eye" size={28} style={{color:BRAND_DIM}}/>
+                  <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"10px 0 0"}}>You're viewing this listing as an employer — applying is only available for job seeker accounts.</p>
+                </div>
+              ):alreadyApplied||submitted?<div style={{textAlign:"center",background:BRAND_LIGHT,borderRadius:14,padding:"2rem"}}><Icon name="check-circle" size={36} style={{color:BRAND}}/><h3 style={{color:BRAND,margin:"8px 0"}}>{submitted?"Application submitted!":"Applied"}</h3><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{submitted?`You've successfully applied for ${selected.title}. You can track its status under "Applied Jobs".`:"You have already applied for this position."}</p></div>:(<>
                 <Card><SH icon="user-circle" title="Apply for this position"/><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}><F label="Full name" error={errors.name} required><input style={inp} value={form.name} onChange={e=>sf("name",e.target.value)}/></F><F label="Email" error={errors.email} required><input style={inp} type="email" value={form.email} onChange={e=>sf("email",e.target.value)}/></F><F label="Phone number" error={errors.phone} required><input style={inp} value={form.phone} onChange={e=>sf("phone",e.target.value)}/></F><F label="CV link" error={errors.cvLink} required><input style={inp} type="url" value={form.cvLink} onChange={e=>sf("cvLink",e.target.value)} placeholder="https://..."/></F><F label="Portfolio link"><input style={inp} type="url" value={form.portfolio} onChange={e=>sf("portfolio",e.target.value)} placeholder="https://..."/></F><F label="Salary expected" error={errors.salary} required><input style={inp} value={form.salary} onChange={e=>sf("salary",e.target.value)} placeholder="e.g. 35M VND/month"/></F><F label="Available to start" error={errors.onboard} required><select style={inp} value={form.onboard} onChange={e=>sf("onboard",e.target.value)}><option value="">-- Select --</option>{ONBOARD_OPTS.map(o=><option key={o}>{o}</option>)}</select></F></div></Card>
                 <label style={{display:"flex",alignItems:"flex-start",gap:10,padding:"1rem",background:"#F8F9FB",borderRadius:10,border:`1px solid ${form.consent?BRAND:"var(--color-border-tertiary)"}`,cursor:"pointer",marginBottom:"1rem"}}><input type="checkbox" checked={form.consent} onChange={e=>sf("consent",e.target.checked)} style={{marginTop:3,accentColor:BRAND,width:16,height:16,flexShrink:0}}/><span style={{fontSize:12,color:"var(--color-text-primary)",lineHeight:1.6}}>I agree that my personal information and application details may be stored and processed for this job application. This consent is required to apply.</span></label>{errors.consent&&<p style={{fontSize:11,color:"#E24B4A",margin:"-6px 0 10px"}}>{errors.consent}</p>}
                 <Btn onClick={apply} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"13px"}}>Apply →</Btn>
@@ -2213,7 +2322,7 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   const [viewingRequest,setViewingRequest]=useState(null);
 
   const load=async()=>{
-    const[jobsD,reqD,appsD,candD]=await Promise.all([ld(SK.JOBS,true),ld(SK.REQUESTS,true),ld(SK.APPLICATIONS,true),ld(SK.CANDIDATES,true)]);
+    const{jobsD,reqD,appsD,candD}=await ldMany({jobsD:SK.JOBS,reqD:SK.REQUESTS,appsD:SK.APPLICATIONS,candD:SK.CANDIDATES});
     setJobsAll(jobsD||[]);
     setRequestsAll(reqD||[]);
     setApplications(appsD||[]);
@@ -2735,7 +2844,7 @@ function App(){
 
   // Admin console (talent pool & jobs moderation) — accessible via #admin, no
   // job-seeker/employer login required.
-  if(isAdmin)return <AdminPage/>;
+  if(isAdmin)return <AdminGate/>;
 
   if(!role)return <RoleSelection onSelect={r=>setRole(r)}/>;
 
@@ -2763,7 +2872,7 @@ function App(){
       <Nav page={page} setPage={setPage} notifCount={notifCount} role={role} onLogout={logout} onDeleteAccount={deleteAccount} onOpenSync={()=>setShowSync(true)} showSync={isAdmin} onOpenNotifs={openNotifs}/>
       {page==="candidate"&&role==="jobseeker"&&<CandidatePage onSubmit={bump} refresh={refresh} session={session}/>}
       {page==="public"&&<PublicPage onRequest={bump} session={session} company={company}/>}
-      {page==="jobs"&&role==="jobseeker"&&<JobsPage onApply={bump} session={session}/>}
+      {page==="jobs"&&<JobsPage onApply={bump} session={session}/>}
       {page==="employer"&&role==="employer"&&<EmployerPage onPost={bump} refresh={refresh} session={session} company={company} onCompanyUpdated={setCompany}/>}
       {page==="notifications"&&<NotificationsPage onRefresh={bump} role={role} session={session} onBack={()=>setPage(prevPage)}/>}
       {showSync&&<SyncSettingsModal onClose={()=>setShowSync(false)}/>}
