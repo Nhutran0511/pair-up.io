@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-03-new-sheet-url";
+const APP_BUILD="2026-08-03-salary-free-text";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -1521,10 +1521,7 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
             </select>
           </F>
           <F label="Salary expectation" error={errors.salary} required>
-            <select style={inp} value={form.salary} onChange={e=>sf("salary",e.target.value)}>
-              <option value="">-- Select --</option>
-              {SALARY_OPTS.map(o=><option key={o}>{o}</option>)}
-            </select>
+            <input style={inp} value={form.salary} onChange={e=>sf("salary",e.target.value)} placeholder="e.g. 30–50M VND"/>
           </F>
         </div>
         <F label="Languages" error={errors.languages} required>
