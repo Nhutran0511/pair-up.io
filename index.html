@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-02-employer-jobs-tab";
+const APP_BUILD="2026-08-03-new-sheet-url";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -42,7 +42,7 @@ const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // backend for sign up / log in / data sync, with no per-browser setup needed.
 // The Admin sync settings (cloud icon, #admin) can still override this locally
 // if you ever redeploy to a new URL, without needing to edit this file.
-const DEFAULT_GSHEET_URL="https://script.google.com/macros/s/AKfycbyQjEVoHPGIgWfQmDvifXPbZB_uKFTjtDEAAvVkJ7nOuLP3OxThyCKIctXMcm7sc6KtvQ/exec";
+const DEFAULT_GSHEET_URL="https://script.google.com/macros/s/AKfycbz3uWP7XpRMojsfL2K_vsL-Stmz0VcTeAcXzaUNeE_z-Gr27UhxAvbFFaqrYh9vjt2Q6Q/exec";
 async function getSheetUrl(){
   const override=(await ld(GSHEET_URL_KEY,true))||"";
   return override||DEFAULT_GSHEET_URL;
