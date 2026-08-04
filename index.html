@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-03-summary-rte-exploring-filter";
+const APP_BUILD="2026-08-03-perf-loading-msg";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -133,7 +133,7 @@ function stripHtml(html){if(!html)return"";return html.replace(/<[^>]*>/g," ").r
 // This dedupes concurrent requests for the same sheet into a single round-trip,
 // and keeps that result fresh for a few seconds so a burst of reads (e.g. a page
 // with several components mounting at once) only costs one network call.
-const SHEET_CACHE_TTL_MS=4000;
+const SHEET_CACHE_TTL_MS=8000;
 const _sheetCache={}; // sheetName -> {ts, promise}
 async function sheetList(sheetName,fresh=false){
   const now=Date.now();
@@ -1164,7 +1164,7 @@ function AdminPage(){
         <p style={{color:"var(--color-text-secondary)",fontSize:11,margin:"0 0 1.5rem",fontFamily:"monospace"}}>Build: {APP_BUILD}</p>
 
         {loading?(
-          <div style={{display:"flex",justifyContent:"center",padding:"4rem"}}><Icon name="loader-2" size={26} style={{color:BRAND,animation:"spin 1s linear infinite"}}/></div>
+          <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,padding:"4rem"}}><Icon name="loader-2" size={26} style={{color:BRAND,animation:"spin 1s linear infinite"}}/><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>PairUp is loading, please wait...</p></div>
         ):(
         <>
         {tab==="candidates"&&(
@@ -1398,8 +1398,9 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
 
   // Wait for storage to load before rendering
   if(!ready)return(
-    <div style={{display:"flex",alignItems:"center",justifyContent:"center",padding:"4rem",fontFamily:FONT}}>
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,padding:"4rem",fontFamily:FONT}}>
       <Icon name="loader-2" size={24} style={{color:BRAND,animation:"spin 1s linear infinite"}}/>
+      <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>PairUp is loading, please wait...</p>
     </div>
   );
 
@@ -2776,6 +2777,12 @@ function App(){
       if(s){
         setRole(s.role);setSession(s);
         setPage(s.role==="jobseeker"?"candidate":"employer");
+        // Warm the cache in the background (not awaited) so the first page the
+        // person actually lands on often finds its data already cached.
+        const prefetchSheets=s.role==="jobseeker"
+          ?["Job Seekers","Jobs","Companies","Notifications"]
+          :["Jobs","Requests","Applied","Job Seekers","Companies","Notifications"];
+        sheetListMulti(prefetchSheets).catch(()=>{});
       }
       setBooting(false);
     })();
@@ -2846,8 +2853,9 @@ function App(){
   };
 
   if(booting)return(
-    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--color-background-tertiary)"}}>
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14,background:"var(--color-background-tertiary)",fontFamily:FONT}}>
       <Icon name="loader-2" size={26} style={{color:BRAND,animation:"spin 1s linear infinite"}}/>
+      <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>PairUp is loading, please wait...</p>
     </div>
   );
 
@@ -2860,8 +2868,9 @@ function App(){
   if(!session)return <AuthPage role={role} onBack={()=>setRole(null)} onAuthed={s=>{setSession(s);setPage(s.role==="jobseeker"?"candidate":"employer");}}/>;
 
   if(session.role==="employer"&&!companyChecked)return(
-    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--color-background-tertiary)"}}>
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14,background:"var(--color-background-tertiary)",fontFamily:FONT}}>
       <Icon name="loader-2" size={26} style={{color:BRAND,animation:"spin 1s linear infinite"}}/>
+      <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>PairUp is loading, please wait...</p>
     </div>
   );
 
