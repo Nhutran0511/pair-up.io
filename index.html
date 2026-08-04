@@ -75,8 +75,12 @@ const SHEET_MAP={
 };
 
 async function sd(k,v,s=false){
-  if(s&&SHEET_MAP[k]) throw new Error(`Shared key "${k}" must use a keyed mutation helper.`);
   try { localStorage.setItem(k, JSON.stringify(v)); } catch(e) { console.error(e); }
+  if(s&&SHEET_MAP[k]){
+    // Fire-and-forget: don't make the UI wait on a network round-trip for every save.
+    sheetReplaceAll(SHEET_MAP[k].sheet,Array.isArray(v)?v:[],SHEET_MAP[k].key)
+      .catch(e=>console.error(`Sheet sync failed for "${SHEET_MAP[k].sheet}"`,e));
+  }
 }
 async function ld(k,s=false,fresh=false){
   if(s&&SHEET_MAP[k]){
@@ -89,9 +93,16 @@ async function ld(k,s=false,fresh=false){
   }
   try { const v=localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; }
 }
-// Duplicate checks and multi-row business rules may still need a fresh shared
-// read before issuing keyed mutations. This helper makes a failed remote read
-// explicit instead of treating it as an empty table.
+// CRITICAL: any code that reads a shared table with the intent of writing it
+// back (add/update/delete one item then save the whole array) must use this
+// instead of `(await ld(key,true))||[]`. A plain `||[]` silently treats "the
+// Sheet was unreachable AND there's no local cache" as "the table is empty" —
+// then the very next save would overwrite the real Google Sheet data with an
+// empty array, permanently erasing everyone else's records. This helper makes
+// that failure explicit and aborts the write instead. It also always bypasses
+// the short-lived read cache (bypass="fresh"), since writing back a value that
+// was cached even a couple seconds ago could silently undo a very recent change
+// made by someone else.
 async function ldForWrite(key){
   const v=await ld(key,true,true);
   if(v===null){
@@ -112,7 +123,7 @@ function stripHtml(html){if(!html)return"";return html.replace(/<[^>]*>/g," ").r
 // above (DEFAULT_GSHEET_URL) so this works for every visitor automatically — no
 // per-browser setup needed. Candidate profiles, jobs, contact requests,
 // applications, companies, and notifications are all mirrored two-way ("list" to
-// read, keyed mutations to write) to their own tab (see SHEET_MAP above), and sign up /
+// read, "replace" to write) to their own tab (see SHEET_MAP above), and sign up /
 // log in read/write a "Users" tab (see sheetSignup/sheetLogin below). The sync
 // settings (cloud icon, #admin) can set a local override if you ever redeploy to
 // a new URL.
@@ -149,86 +160,16 @@ async function sheetList(sheetName,fresh=false){
   _sheetCache[sheetName]={ts:now,promise};
   return promise;
 }
-async function requestSheetMutation(sheetName,payload){
-  const url=await getSheetUrl();
-  if(!url) throw new Error("Google Sheets sync is not configured.");
-  const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(payload)});
-  const text=await res.text();
-  let data;
-  try{ data=JSON.parse(text); }
-  catch(e){ throw new Error(`Sheet mutation returned a non-JSON response for "${sheetName}".`); }
-  if(!res.ok||!data||data.success!==true) throw new Error(data?.message||data?.error||`Sheet mutation failed for "${sheetName}".`);
-  delete _sheetCache[sheetName];
-  return data;
-}
-async function sheetUpsert(sheetName,keyField,row){
-  return requestSheetMutation(sheetName,{action:"upsert",sheet:sheetName,keyField,row});
-}
-async function sheetDeleteRow(sheetName,keyField,keyValue){
-  return requestSheetMutation(sheetName,{action:"delete_row",sheet:sheetName,keyField,keyValue});
-}
-async function sheetUpsertMany(sheetName,keyField,rows){
-  return requestSheetMutation(sheetName,{action:"upsert_many",sheet:sheetName,keyField,rows});
-}
-function readLocalArray(key){
-  try{ const value=JSON.parse(localStorage.getItem(key)||"[]"); return Array.isArray(value)?value:[]; }
-  catch(e){ return []; }
-}
-function writeLocalArray(key,rows){
-  try{ localStorage.setItem(key,JSON.stringify(rows)); }
-  catch(e){ console.error(e); }
-}
-async function upsertShared(key,row){
-  const config=SHEET_MAP[key];
-  if(!config) throw new Error(`Unknown shared key: ${key}`);
+async function sheetReplaceAll(sheetName,rows,keyField){
   try{
-    const result=await sheetUpsert(config.sheet,config.key,row);
-    const saved=result.row||row;
-    const local=readLocalArray(key);
-    const index=local.findIndex(item=>String(item?.[config.key])===String(saved[config.key]));
-    if(index>=0)local[index]={...local[index],...saved};else local.push(saved);
-    writeLocalArray(key,local);
-    return saved;
-  }catch(e){
-    console.error(`Could not save shared row in "${config.sheet}"`,e);
-    alert("Could not save this change to the shared data. Please check your connection and try again.");
-    return false;
-  }
-}
-async function deleteShared(key,keyValue){
-  const config=SHEET_MAP[key];
-  if(!config) throw new Error(`Unknown shared key: ${key}`);
-  try{
-    await sheetDeleteRow(config.sheet,config.key,keyValue);
-    writeLocalArray(key,readLocalArray(key).filter(item=>String(item?.[config.key])!==String(keyValue)));
-    return true;
-  }catch(e){
-    console.error(`Could not delete shared row from "${config.sheet}"`,e);
-    alert("Could not delete this item from the shared data. Please check your connection and try again.");
-    return false;
-  }
-}
-async function upsertManyShared(key,rows){
-  const config=SHEET_MAP[key];
-  if(!config) throw new Error(`Unknown shared key: ${key}`);
-  if(!rows.length)return [];
-  try{
-    const result=await sheetUpsertMany(config.sheet,config.key,rows);
-    const savedRows=Array.isArray(result.rows)?result.rows:rows;
-    const local=readLocalArray(key);
-    const indexes=new Map(local.map((item,index)=>[String(item?.[config.key]),index]));
-    savedRows.forEach(saved=>{
-      const localIndex=indexes.get(String(saved[config.key]));
-      if(localIndex===undefined){indexes.set(String(saved[config.key]),local.length);local.push(saved);}
-      else local[localIndex]={...local[localIndex],...saved};
-    });
-    writeLocalArray(key,local);
-    return savedRows;
-  }catch(e){
-    console.error(`Could not save shared rows in "${config.sheet}"`,e);
-    alert("Could not save these changes to the shared data. Please check your connection and try again.");
-    return false;
-  }
+    const url=await getSheetUrl();
+    if(!url) return false;
+    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"replace",sheet:sheetName,data:rows,keyField})});
+    const text=await res.text();
+    let data; try{ data=JSON.parse(text); }catch(e){ return false; }
+    delete _sheetCache[sheetName]; // this sheet just changed — next read must be fresh
+    return !!(data&&data.success);
+  }catch(e){ console.error(`Sheet replace failed for "${sheetName}"`,e); return false; }
 }
 
 // Batches several "list" reads into ONE HTTP round-trip. Each parallel-but-separate
@@ -972,9 +913,12 @@ function CompanyProfilePage({session,onSaved,existing}){
   const submit=async()=>{
     const e=validate();if(Object.keys(e).length){setErrors(e);return;}
     const company={...form,code:session.code,email:session.email,createdAt:new Date().toISOString()};
-    const saved=await upsertShared(SK.COMPANIES,company);
-    if(!saved)return;
-    onSaved(saved);
+    const all=await ldForWrite(SK.COMPANIES);
+    if(all===null)return;
+    const i=all.findIndex(c=>c.code===session.code);
+    if(i>=0)all[i]=company;else all.push(company);
+    await sd(SK.COMPANIES,all,true);
+    onSaved(company);
   };
 
   return(
@@ -1175,16 +1119,20 @@ function AdminPage(){
 
   const deleteCandidate=async(c)=>{
     if(!window.confirm(`Delete candidate ${c.code} (${c.position||"no title"})? This permanently removes their talent pool profile. This cannot be undone.`))return;
-    if(!(await deleteShared(SK.CANDIDATES,c.code)))return;
-    setCandidates(items=>items.filter(item=>item.code!==c.code));
+    const all=await ldForWrite(SK.CANDIDATES);
+    if(all===null)return;
+    await sd(SK.CANDIDATES,all.filter(x=>x.code!==c.code),true);
     setViewing(null);
+    load();
   };
 
   const deleteJob=async(j)=>{
     if(!window.confirm(`Delete job ${j.code} (${j.title||"no title"})? This permanently removes the listing. This cannot be undone.`))return;
-    if(!(await deleteShared(SK.JOBS,j.code)))return;
-    setJobs(items=>items.filter(item=>item.code!==j.code));
+    const all=await ldForWrite(SK.JOBS);
+    if(all===null)return;
+    await sd(SK.JOBS,all.filter(x=>x.code!==j.code),true);
     setViewing(null);
+    load();
   };
 
   return(
@@ -1380,7 +1328,12 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
   // ── Helpers ──
   const persist=async(c)=>{
     await sd(LKEY,c);
-    return !!(await upsertShared(SK.CANDIDATES,c));
+    const all=await ldForWrite(SK.CANDIDATES);
+    if(all===null)return false;
+    const i=all.findIndex(x=>x.code===c.code);
+    if(i>=0)all[i]=c;else all.push(c);
+    await sd(SK.CANDIDATES,all,true);
+    return true;
   };
 
   const validate=()=>{
@@ -1431,10 +1384,14 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
   };
 
   const doRespond=async(req,action)=>{
-    const updatedRequest=await upsertShared(SK.REQUESTS,{id:req.id,status:action});
-    if(!updatedRequest)return;
-    const notification={id:gid(),type:"response",to:req.employerEmail||"employer",candidateCode:profile.code,companyName:req.company,position:req.title,action,createdAt:new Date().toISOString(),read:false};
-    if(!(await upsertShared(SK.NOTIFS,notification)))return;
+    const all=await ldForWrite(SK.REQUESTS);
+    if(all===null)return;
+    const i=all.findIndex(r=>r.id===req.id);
+    if(i>=0){all[i].status=action;await sd(SK.REQUESTS,all,true);}
+    const notifs=await ldForWrite(SK.NOTIFS);
+    if(notifs===null)return;
+    notifs.push({id:gid(),type:"response",to:req.employerEmail||"employer",candidateCode:profile.code,companyName:req.company,position:req.title,action,createdAt:new Date().toISOString(),read:false});
+    await sd(SK.NOTIFS,notifs,true);
     setRequests(r=>r.map(x=>x.id===req.id?{...x,status:action}:x));
     setSelReq(null);onSubmit();
   };
@@ -1900,11 +1857,11 @@ function PublicPage({onRequest,session,company}){
     const req={id:gid(),candidateCode:selected.code,employerEmail:session?.email||null,companyCode:session?.code||null,...reqForm,createdAt:new Date().toISOString(),status:"pending"};
     const existing=await ldForWrite(SK.REQUESTS);
     if(existing===null)return;
-    const duplicate=existing.find(item=>item.candidateCode===req.candidateCode&&item.companyCode===req.companyCode&&item.status==="pending");
-    if(duplicate){alert("A pending contact request already exists for this candidate.");return;}
-    if(!(await upsertShared(SK.REQUESTS,req)))return;
-    const notification={id:gid(),type:"contact_request",to:selected.code,company:reqForm.company,title:reqForm.title,message:`${reqForm.company} has sent you a contact request for the role of ${reqForm.title}`,detail:req,createdAt:new Date().toISOString(),read:false};
-    if(!(await upsertShared(SK.NOTIFS,notification)))return;
+    await sd(SK.REQUESTS,[...existing,req],true);
+    const notifs=await ldForWrite(SK.NOTIFS);
+    if(notifs===null)return;
+    notifs.push({id:gid(),type:"contact_request",to:selected.code,company:reqForm.company,title:reqForm.title,message:`${reqForm.company} has sent you a contact request for the role of ${reqForm.title}`,detail:req,createdAt:new Date().toISOString(),read:false});
+    await sd(SK.NOTIFS,notifs,true);
     if(selected.email){
       sendAutomationEmail(
         selected.email,
@@ -2087,7 +2044,10 @@ function PostJobPage({onBack,onSuccess,company,session}){
     await sd(BENEFITS_KEY,form.benefits); // instant local cache
     setBenefitsSaved(true);
     if(session?.code){
-      if(!(await upsertShared(SK.COMPANIES,{code:session.code,savedBenefits:form.benefits})))return;
+      const all=await ldForWrite(SK.COMPANIES);
+      if(all===null)return; // network hiccup — local cache above still works for this tab
+      const idx=all.findIndex(c=>c.code===session.code);
+      if(idx>=0){ all[idx]={...all[idx],savedBenefits:form.benefits}; await sd(SK.COMPANIES,all,true); }
     }
   };
 
@@ -2105,16 +2065,18 @@ function PostJobPage({onBack,onSuccess,company,session}){
     if(Object.keys(e).length){setErrors(e);return;}
     const code=gjid();
     const job={...form,code,companyCode:session?.code||null,companyEmail:session?.email||null,createdAt:new Date().toISOString(),status:"active",recruitmentProcess:form.recruitmentProcess?.length?form.recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))};
-    const ex=applyBenefitsToAll&&form.benefits.trim()?await ldForWrite(SK.JOBS):[];
+    const ex=await ldForWrite(SK.JOBS);
     if(ex===null)return;
-    if(applyBenefitsToAll&&form.benefits.trim()){
-      await sd(BENEFITS_KEY,form.benefits);
-      const benefitUpdates=ex.filter(existing=>existing.companyCode===session?.code).map(existing=>({code:existing.code,benefits:form.benefits}));
-      if(benefitUpdates.length&&!(await upsertManyShared(SK.JOBS,benefitUpdates)))return;
-    }
-    if(!(await upsertShared(SK.JOBS,job)))return;
-    const notification={id:gid(),type:"job_posted",to:session?.email||"employer",message:`Job posted: ${form.title} at ${form.company}`,jobCode:code,company:form.company,title:form.title,createdAt:new Date().toISOString(),read:false};
-    if(!(await upsertShared(SK.NOTIFS,notification)))return;
+    if(applyBenefitsToAll && form.benefits.trim()) await sd(BENEFITS_KEY,form.benefits);
+    const jobsToSave=applyBenefitsToAll && form.benefits.trim()
+      ? ex.map(existing=>existing.companyCode===session?.code?{...existing,benefits:form.benefits}:existing)
+      : ex;
+    await sd(SK.JOBS,[...jobsToSave,job],true);
+    // Push notification
+    const notifs=await ldForWrite(SK.NOTIFS);
+    if(notifs===null)return;
+    notifs.push({id:gid(),type:"job_posted",to:session?.email||"employer",message:`Job posted: ${form.title} at ${form.company}`,jobCode:code,company:form.company,title:form.title,createdAt:new Date().toISOString(),read:false});
+    await sd(SK.NOTIFS,notifs,true);
     setDone(code);onSuccess();
   };
 
@@ -2212,18 +2174,13 @@ function JobsPage({onApply,session}){
   const [appliedCodes,setAppliedCodes]=useState(new Set());
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
 
-  const loadInitial=async()=>{
+  const load=async()=>{
     const {d,co}=await ldMany({d:SK.JOBS,co:SK.COMPANIES});
     setJobs((d||[]).filter(j=>j.status==="active"));
     setCompanies(co||[]);
   };
-  const refreshJobs=async()=>{
-    if(document.visibilityState!=="visible")return;
-    const d=await ld(SK.JOBS,true,true);
-    setJobs((d||[]).filter(j=>j.status==="active"));
-  };
   useEffect(()=>{
-    loadInitial();
+    load();
     if(session.role==="jobseeker"){
       (async()=>{
         const profile=await ld("pairup_my_profile_"+session.email);
@@ -2231,7 +2188,7 @@ function JobsPage({onApply,session}){
         setAppliedCodes(new Set((apps||[]).filter(a=>a.candidateCode===session.code||(profile?.email&&a.email===profile.email)).map(a=>a.jobCode)));
       })();
     }
-    const iv=setInterval(refreshJobs,60000); // refresh active jobs once per minute while visible
+    const iv=setInterval(load,10000); // keep the list fresh as employers post/reactivate jobs
     return ()=>clearInterval(iv);
   },[]);
 
@@ -2273,9 +2230,11 @@ function JobsPage({onApply,session}){
     const duplicate=existing.find(a=>a.jobCode===selected.code && (a.candidateCode===session.code||(a.email===form.email)));
     if(duplicate){setAlreadyApplied(true);setAppliedCodes(prev=>new Set([...prev,selected.code]));return;}
     const application={id:gid(),jobCode:selected.code,jobTitle:selected.title,company:selected.company,companyEmail:selected.companyEmail||null,candidateCode:session.code,profileSnapshot:profile||null,...form,createdAt:new Date().toISOString(),status:"applied",profileEvents:[]};
-    if(!(await upsertShared(SK.APPLICATIONS,application)))return;
-    const notification={id:gid(),type:"application",to:selected.companyEmail||"employer",message:`New application for ${selected.title} at ${selected.company}`,title:selected.title,company:selected.company,applicationId:application.id,candidateCode:application.candidateCode,createdAt:new Date().toISOString(),read:false};
-    if(!(await upsertShared(SK.NOTIFS,notification)))return;
+    await sd(SK.APPLICATIONS,[...existing,application],true);
+    const notifs=await ldForWrite(SK.NOTIFS);
+    if(notifs===null)return;
+    notifs.push({id:gid(),type:"application",to:selected.companyEmail||"employer",message:`New application for ${selected.title} at ${selected.company}`,title:selected.title,company:selected.company,applicationId:application.id,candidateCode:application.candidateCode,createdAt:new Date().toISOString(),read:false});
+    await sd(SK.NOTIFS,notifs,true);
     setAlreadyApplied(true);setAppliedCodes(prev=>new Set([...prev,selected.code]));setSubmitted(true);onApply();
   };
 
@@ -2390,10 +2349,12 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   // that — even after navigating away and back, or reloading — it stays masked.
   const openRequest=async(r)=>{
     if(r.status==="accepted"&&!r.viewedByEmployer){
+      const all=await ldForWrite(SK.REQUESTS);
+      if(all===null)return;
+      const idx=all.findIndex(x=>x.id===r.id);
       const viewedAt=new Date().toISOString();
-      const updated=await upsertShared(SK.REQUESTS,{id:r.id,viewedByEmployer:true,viewedAt});
-      if(!updated)return;
-      setRequestsAll(all=>all.map(item=>item.id===r.id?{...item,...updated}:item));
+      if(idx>=0){ all[idx]={...all[idx],viewedByEmployer:true,viewedAt}; await sd(SK.REQUESTS,all,true); }
+      setRequestsAll(all);
       setViewingRequest({...r,viewedByEmployer:true,viewedAt,__firstView:true});
     }else{
       setViewingRequest(r);
@@ -2409,16 +2370,22 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   });
 
   const saveJob=async(updated)=>{
-    const saved=await upsertShared(SK.JOBS,updated);
-    if(!saved)return;
-    setJobsAll(all=>{const index=all.findIndex(job=>job.code===saved.code);return index>=0?all.map((job,i)=>i===index?saved:job):[...all,saved];});setSelectedJob(saved);onPost();
+    const all=await ldForWrite(SK.JOBS);
+    if(all===null)return;
+    const idx=all.findIndex(j=>j.code===updated.code);
+    if(idx>=0)all[idx]=updated; else all.push(updated);
+    await sd(SK.JOBS,all,true);
+    setJobsAll(all);setSelectedJob(updated);onPost();
   };
 
   const toggleJobStatus=async(job)=>{
     const updated={...job,status:job.status==="active"?"inactive":"active"};
-    const saved=await upsertShared(SK.JOBS,updated);
-    if(!saved)return;
-    setJobsAll(all=>all.map(item=>item.code===saved.code?saved:item));
+    const all=await ldForWrite(SK.JOBS);
+    if(all===null)return;
+    const idx=all.findIndex(j=>j.code===job.code);
+    if(idx>=0)all[idx]=updated; else all.push(updated);
+    await sd(SK.JOBS,all,true);
+    setJobsAll(all);
     if(selectedJob?.code===job.code)setSelectedJob(updated);
     onPost();
   };
@@ -2432,10 +2399,11 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   };
 
   const updateApplication=async(app,patch)=>{
-    const updated={id:app.id,...patch,updatedAt:new Date().toISOString()};
-    const saved=await upsertShared(SK.APPLICATIONS,updated);
-    if(!saved)return;
-    setApplications(all=>all.map(item=>item.id===saved.id?{...item,...saved}:item));onPost();
+    const all=await ldForWrite(SK.APPLICATIONS);
+    if(all===null)return;
+    const idx=all.findIndex(a=>a.id===app.id); if(idx<0)return;
+    all[idx]={...all[idx],...patch,updatedAt:new Date().toISOString()};
+    await sd(SK.APPLICATIONS,all,true);setApplications(all);onPost();
   };
 
   const moveCandidate=async(app,round,status,reason,note)=>{
@@ -2751,8 +2719,9 @@ function NotificationsPage({onRefresh,role,session,onBack}){
       setNotifs(scoped);
       const unread=scoped.filter(n=>!n.read);
       if(unread.length){
-        const changed=unread.map(n=>({id:n.id,read:true}));
-        if(await upsertManyShared(SK.NOTIFS,changed))onRefresh();
+        const updated=all.map(n=>scoped.some(s=>s.id===n.id)?{...n,read:true}:n);
+        await sd(SK.NOTIFS,updated,true);
+        onRefresh();
       }
     })();
   },[]);
@@ -2834,8 +2803,7 @@ function App(){
 
   useEffect(()=>{
     const checkNotifs=async()=>{
-      if(!session||document.visibilityState!=="visible")return;
-      const n=(await ld(SK.NOTIFS,true,true))||[];
+      const n=(await ld(SK.NOTIFS,true))||[];
       const relevant=n.filter(x=>{
         if(!session)return false;
         return session.role==="jobseeker"
@@ -2843,11 +2811,14 @@ function App(){
           :(x.to?.toLowerCase?.()===session.email?.toLowerCase()||x.to==="employer"||x.to==="all");
       });
       const unreadCount=relevant.filter(x=>!x.read).length;
+      console.log(`[pairup notif check] role=${session?.role} code=${session?.code} email=${session?.email} | total=${n.length} matched=${relevant.length} unread=${unreadCount}`);
+      console.log("[pairup notif check] all notif 'to' values:",n.map(x=>`to=${x.to} read=${x.read} type=${x.type}`).join(" | "));
       setNotifCount(unreadCount);
     };
-    if(session)checkNotifs();
-    // Poll so new notifications created by someone else show up without refresh.
-    const interval=setInterval(checkNotifs,60000);
+    checkNotifs();
+    // Poll so new notifications created by someone else (a different browser/
+    // device) show up on their own, without the person needing to refresh.
+    const interval=setInterval(checkNotifs,20000);
     return ()=>clearInterval(interval);
   },[refresh,session]);
 
@@ -2869,11 +2840,13 @@ function App(){
       const accounts=((await ld(SK.ACCOUNTS_JS,true))||[]).filter(a=>a.email.toLowerCase()!==session.email.toLowerCase());
       await sd(SK.ACCOUNTS_JS,accounts,true);
       await sd("pairup_my_profile_"+session.email,null,true);
-      await deleteShared(SK.CANDIDATES,session.code);
+      const candidates=await ldForWrite(SK.CANDIDATES);
+      if(candidates!==null) await sd(SK.CANDIDATES,candidates.filter(c=>c.code!==session.code),true);
     }else{
       const accounts=((await ld(SK.ACCOUNTS_EMP,true))||[]).filter(a=>a.email.toLowerCase()!==session.email.toLowerCase());
       await sd(SK.ACCOUNTS_EMP,accounts,true);
-      await deleteShared(SK.COMPANIES,session.code);
+      const companies=await ldForWrite(SK.COMPANIES);
+      if(companies!==null) await sd(SK.COMPANIES,companies.filter(c=>c.code!==session.code),true);
     }
     await clearSession();
     setSession(null);setRole(null);setCompany(null);setCompanyChecked(false);
