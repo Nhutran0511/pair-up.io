@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-05-admin-dashboard-visits";
+const APP_BUILD="2026-08-05-global-button-loading";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -420,6 +420,130 @@ const Btn=({children,onClick,variant="primary",style={},...p})=>{
   const v={primary:{background:BRAND,color:"#fff"},outline:{background:"none",border:`1.5px solid ${BRAND}`,color:BRAND},ghost:{background:"none",border:"1px solid var(--color-border-secondary)",color:"var(--color-text-secondary)"},danger:{background:"none",border:"1.5px solid #E24B4A",color:"#E24B4A"}};
   return <button onClick={onClick} style={{...base,...v[variant],...style}} {...p}>{children}</button>;
 };
+
+const GLOBAL_LOADING_MIN_MS=400;
+const GLOBAL_LOADING_LOCAL_MS=450;
+const GLOBAL_LOADING_REQUEST_GRACE_MS=180;
+const GLOBAL_LOADING_MAX_MS=30000;
+
+function GlobalInteractionLoading(){
+  const [isVisible,setIsVisible]=useState(false);
+
+  useEffect(()=>{
+    let isMounted=true;
+    let isInteractionActive=false;
+    let isInteractionWindowOpen=false;
+    let isRequestChainOpen=false;
+    let pendingRequests=0;
+    let shownAt=0;
+    let interactionWindowTimeout=null;
+    let localTimeout=null;
+    let hideTimeout=null;
+    let requestGraceTimeout=null;
+    let maximumTimeout=null;
+
+    const clearTimer=timer=>{
+      if(timer!==null)clearTimeout(timer);
+    };
+    const hide=()=>{
+      isInteractionActive=false;
+      isInteractionWindowOpen=false;
+      isRequestChainOpen=false;
+      pendingRequests=0;
+      clearTimer(interactionWindowTimeout);
+      clearTimer(localTimeout);
+      clearTimer(hideTimeout);
+      clearTimer(requestGraceTimeout);
+      clearTimer(maximumTimeout);
+      interactionWindowTimeout=null;
+      localTimeout=null;
+      hideTimeout=null;
+      requestGraceTimeout=null;
+      maximumTimeout=null;
+      if(isMounted)setIsVisible(false);
+    };
+    const scheduleHide=delay=>{
+      clearTimer(hideTimeout);
+      const minimumRemaining=Math.max(0,GLOBAL_LOADING_MIN_MS-(Date.now()-shownAt));
+      hideTimeout=setTimeout(hide,Math.max(delay,minimumRemaining));
+    };
+    const finishRequest=()=>{
+      if(!isInteractionActive)return;
+      pendingRequests=Math.max(0,pendingRequests-1);
+      if(pendingRequests!==0)return;
+      isRequestChainOpen=true;
+      clearTimer(requestGraceTimeout);
+      requestGraceTimeout=setTimeout(()=>{
+        isRequestChainOpen=false;
+      },GLOBAL_LOADING_REQUEST_GRACE_MS);
+      scheduleHide(GLOBAL_LOADING_REQUEST_GRACE_MS);
+    };
+    const startInteraction=()=>{
+      isInteractionActive=true;
+      isInteractionWindowOpen=true;
+      isRequestChainOpen=false;
+      shownAt=Date.now();
+      clearTimer(interactionWindowTimeout);
+      clearTimer(localTimeout);
+      clearTimer(hideTimeout);
+      clearTimer(requestGraceTimeout);
+      clearTimer(maximumTimeout);
+      if(isMounted)setIsVisible(true);
+      interactionWindowTimeout=setTimeout(()=>{
+        isInteractionWindowOpen=false;
+      },0);
+      localTimeout=setTimeout(()=>{
+        if(pendingRequests===0&&!isRequestChainOpen)scheduleHide(0);
+      },GLOBAL_LOADING_LOCAL_MS);
+      maximumTimeout=setTimeout(hide,GLOBAL_LOADING_MAX_MS);
+    };
+    const handleClick=event=>{
+      const target=event.target;
+      if(!(target instanceof Element))return;
+      const button=target.closest("button");
+      if(!button||button.disabled||button.matches(":disabled")||button.getAttribute("aria-disabled")==="true")return;
+      startInteraction();
+    };
+
+    const originalFetch=window.fetch;
+    let wrappedFetch=null;
+    if(typeof originalFetch==="function"&&!originalFetch.__pairupGlobalLoadingWrapper){
+      wrappedFetch=function(...args){
+        const shouldTrack=isInteractionActive&&(isInteractionWindowOpen||isRequestChainOpen);
+        if(!shouldTrack)return originalFetch.apply(this,args);
+        pendingRequests++;
+        clearTimer(hideTimeout);
+        let request;
+        try{
+          request=originalFetch.apply(this,args);
+        }catch(error){
+          finishRequest();
+          throw error;
+        }
+        return Promise.resolve(request).finally(finishRequest);
+      };
+      wrappedFetch.__pairupGlobalLoadingWrapper=true;
+      window.fetch=wrappedFetch;
+    }
+
+    document.addEventListener("click",handleClick,true);
+    return ()=>{
+      isMounted=false;
+      document.removeEventListener("click",handleClick,true);
+      hide();
+      if(wrappedFetch&&window.fetch===wrappedFetch)window.fetch=originalFetch;
+    };
+  },[]);
+
+  if(!isVisible)return null;
+  return(
+    <div role="status" aria-live="polite" style={{position:"fixed",top:14,left:"50%",transform:"translateX(-50%)",zIndex:10000,pointerEvents:"none",display:"flex",alignItems:"center",gap:8,background:"rgba(0,44,118,.94)",color:"#fff",padding:"9px 14px",borderRadius:999,boxShadow:"0 6px 20px rgba(0,24,68,.22)",fontFamily:FONT,fontSize:12,fontWeight:700}}>
+      <Icon name="loader-2" size={16} style={{animation:"globalInteractionSpin .8s linear infinite"}}/>
+      Processing...
+      <style>{`@keyframes globalInteractionSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+}
 
 const F=({label,error,required,children,hint})=>(
   <div style={{marginBottom:"1.1rem"}}>
@@ -2990,8 +3114,12 @@ function App(){
   );
 }
 
+function AppRoot(){
+  return <><GlobalInteractionLoading/><App/></>;
+}
+
 const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<App />);
+    root.render(<AppRoot />);
   </script>
 </body>
 </html>
