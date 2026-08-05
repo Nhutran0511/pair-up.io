@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-05-1s-loading-admin-fresh-tabs";
+const APP_BUILD="2026-08-05-no-content-flash-loading";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -426,6 +426,20 @@ const GLOBAL_LOADING_MIN_MS=400;
 const GLOBAL_LOADING_LOCAL_MS=450;
 const GLOBAL_LOADING_REQUEST_GRACE_MS=180;
 const GLOBAL_LOADING_MAX_MS=30000;
+const GLOBAL_LOADING_OPERATION_START_EVENT="pairup:loading-operation-start";
+const GLOBAL_LOADING_OPERATION_END_EVENT="pairup:loading-operation-end";
+
+function waitForReactCommit(){
+  return new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+}
+
+function startGlobalLoadingOperation(){
+  window.dispatchEvent(new Event(GLOBAL_LOADING_OPERATION_START_EVENT));
+}
+
+function finishGlobalLoadingOperation(){
+  window.dispatchEvent(new Event(GLOBAL_LOADING_OPERATION_END_EVENT));
+}
 
 function GlobalInteractionLoading(){
   const [isVisible,setIsVisible]=useState(false);
@@ -436,6 +450,7 @@ function GlobalInteractionLoading(){
     let isInteractionWindowOpen=false;
     let isRequestChainOpen=false;
     let pendingRequests=0;
+    let pendingOperations=0;
     let shownAt=0;
     let interactionWindowTimeout=null;
     let loadingDelayTimeout=null;
@@ -452,6 +467,7 @@ function GlobalInteractionLoading(){
       isInteractionWindowOpen=false;
       isRequestChainOpen=false;
       pendingRequests=0;
+      pendingOperations=0;
       clearTimer(interactionWindowTimeout);
       clearTimer(loadingDelayTimeout);
       clearTimer(localTimeout);
@@ -474,7 +490,7 @@ function GlobalInteractionLoading(){
     const finishRequest=()=>{
       if(!isInteractionActive)return;
       pendingRequests=Math.max(0,pendingRequests-1);
-      if(pendingRequests!==0)return;
+      if(pendingRequests!==0||pendingOperations!==0)return;
       isRequestChainOpen=true;
       clearTimer(requestGraceTimeout);
       requestGraceTimeout=setTimeout(()=>{
@@ -508,15 +524,36 @@ function GlobalInteractionLoading(){
         isInteractionWindowOpen=false;
       },0);
       localTimeout=setTimeout(()=>{
-        if(pendingRequests===0&&!isRequestChainOpen)scheduleHide(0);
+        if(pendingRequests===0&&pendingOperations===0&&!isRequestChainOpen)scheduleHide(0);
       },GLOBAL_LOADING_LOCAL_MS);
-      maximumTimeout=setTimeout(hide,GLOBAL_LOADING_MAX_MS);
+      maximumTimeout=setTimeout(()=>{
+        if(pendingOperations===0)hide();
+      },GLOBAL_LOADING_MAX_MS);
+    };
+    const handleOperationStart=()=>{
+      if(!isInteractionActive)startInteraction(false);
+      pendingOperations++;
+      clearTimer(hideTimeout);
+    };
+    const handleOperationEnd=()=>{
+      if(!isInteractionActive)return;
+      pendingOperations=Math.max(0,pendingOperations-1);
+      if(pendingOperations===0&&pendingRequests===0)scheduleHide(GLOBAL_LOADING_REQUEST_GRACE_MS);
     };
     const handleClick=event=>{
       const target=event.target;
       if(!(target instanceof Element))return;
       const button=target.closest("button");
       if(!button||button.disabled||button.matches(":disabled")||button.getAttribute("aria-disabled")==="true")return;
+      if(pendingOperations>0){
+        isInteractionWindowOpen=true;
+        clearTimer(interactionWindowTimeout);
+        clearTimer(hideTimeout);
+        interactionWindowTimeout=setTimeout(()=>{
+          isInteractionWindowOpen=false;
+        },0);
+        return;
+      }
       startInteraction(button.dataset.loadingImmediate==="true");
     };
 
@@ -542,9 +579,13 @@ function GlobalInteractionLoading(){
     }
 
     document.addEventListener("click",handleClick,true);
+    window.addEventListener(GLOBAL_LOADING_OPERATION_START_EVENT,handleOperationStart);
+    window.addEventListener(GLOBAL_LOADING_OPERATION_END_EVENT,handleOperationEnd);
     return ()=>{
       isMounted=false;
       document.removeEventListener("click",handleClick,true);
+      window.removeEventListener(GLOBAL_LOADING_OPERATION_START_EVENT,handleOperationStart);
+      window.removeEventListener(GLOBAL_LOADING_OPERATION_END_EVENT,handleOperationEnd);
       hide();
       if(wrappedFetch&&window.fetch===wrappedFetch)window.fetch=originalFetch;
     };
@@ -755,7 +796,7 @@ function AdModal({onDone}){
 }
 
 // ── NAV ───────────────────────────────────────────────────────────────────────
-function Nav({page,setPage,notifCount,role,onLogout,onDeleteAccount,onOpenSync,showSync,onOpenNotifs}){
+function Nav({page,onNavigate,notifCount,role,onLogout,onDeleteAccount,onOpenSync,showSync,onOpenNotifs}){
   const tabs=role==="jobseeker"
     ?[{id:"candidate",label:"My Profile",icon:"user"},{id:"public",label:"Talent Pool",icon:"users"},{id:"jobs",label:"Jobs",icon:"briefcase"}]
     :[{id:"employer",label:"Employer",icon:"building"},{id:"public",label:"Talent Pool",icon:"users"},{id:"jobs",label:"Jobs",icon:"briefcase"}];
@@ -766,7 +807,7 @@ function Nav({page,setPage,notifCount,role,onLogout,onDeleteAccount,onOpenSync,s
         <span style={{opacity:0.45,fontWeight:400}}>pair</span><span style={{fontWeight:800}}>up</span>
       </div>
       {tabs.map(t=>(
-        <button key={t.id} onClick={()=>setPage(t.id)} style={{background:"none",border:"none",cursor:"pointer",color:page===t.id?"#fff":"rgba(255,255,255,0.58)",fontWeight:page===t.id?700:400,fontSize:13,padding:"16px 14px",borderBottom:page===t.id?"2px solid #7BA7F5":"2px solid transparent",display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap",fontFamily:FONT}}>
+        <button key={t.id} onClick={()=>onNavigate(t.id)} style={{background:"none",border:"none",cursor:"pointer",color:page===t.id?"#fff":"rgba(255,255,255,0.58)",fontWeight:page===t.id?700:400,fontSize:13,padding:"16px 14px",borderBottom:page===t.id?"2px solid #7BA7F5":"2px solid transparent",display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap",fontFamily:FONT}}>
           <Icon name={t.icon} size={15}/>{t.label}
         </button>
       ))}
@@ -1340,18 +1381,25 @@ function AdminPage(){
   useEffect(()=>{load();},[]);
 
   const selectAdminTab=async destination=>{
-    if(destination==="candidates"){
-      const freshCandidates=await ld(SK.CANDIDATES,true,true);
-      setCandidates(freshCandidates||[]);
-    }else if(destination==="jobs"){
-      const [freshJobs,freshCompanies]=await Promise.all([
-        ld(SK.JOBS,true,true),
-        ld(SK.COMPANIES,true,true)
-      ]);
-      setJobs(freshJobs||[]);
-      setCompanies(freshCompanies||[]);
+    if(destination===tab)return;
+    startGlobalLoadingOperation();
+    try{
+      if(destination==="candidates"){
+        const freshCandidates=await ld(SK.CANDIDATES,true,true);
+        setCandidates(freshCandidates||[]);
+      }else if(destination==="jobs"){
+        const [freshJobs,freshCompanies]=await Promise.all([
+          ld(SK.JOBS,true,true),
+          ld(SK.COMPANIES,true,true)
+        ]);
+        setJobs(freshJobs||[]);
+        setCompanies(freshCompanies||[]);
+      }
+      setTab(destination);
+      await waitForReactCommit();
+    }finally{
+      finishGlobalLoadingOperation();
     }
-    setTab(destination);
   };
 
   const companyName=code=>companies.find(co=>co.code===code)?.name||"—";
@@ -1381,7 +1429,7 @@ function AdminPage(){
           <span style={{opacity:0.45,fontWeight:400}}>pair</span><span style={{fontWeight:800}}>up</span> <span style={{opacity:.7,fontWeight:600,fontSize:14}}>· Admin</span>
         </div>
         {[["dashboard","Dashboard","chart-bar"],["candidates","Talent Pool","users"],["jobs","Jobs","briefcase"]].map(([id,label,icon])=>(
-          <button key={id} data-loading-immediate={id==="candidates"||id==="jobs"?"true":undefined} onClick={()=>selectAdminTab(id)} style={{background:"none",border:"none",cursor:"pointer",color:tab===id?"#fff":"rgba(255,255,255,0.58)",fontWeight:tab===id?700:400,fontSize:13,padding:"16px 14px",borderBottom:tab===id?"2px solid #7BA7F5":"2px solid transparent",display:"flex",alignItems:"center",gap:6}}>
+          <button key={id} onClick={()=>selectAdminTab(id)} style={{background:"none",border:"none",cursor:"pointer",color:tab===id?"#fff":"rgba(255,255,255,0.58)",fontWeight:tab===id?700:400,fontSize:13,padding:"16px 14px",borderBottom:tab===id?"2px solid #7BA7F5":"2px solid transparent",display:"flex",alignItems:"center",gap:6}}>
             <Icon name={icon} size={15}/>{label}
           </button>
         ))}
@@ -2081,8 +2129,8 @@ Response timestamp: ${respondedAt}`
 }
 
 // ── TALENT POOL ───────────────────────────────────────────────────────────────
-function PublicPage({onRequest,session,company}){
-  const [candidates,setCandidates]=useState([]);
+function PublicPage({onRequest,session,company,initialCandidates=[]}){
+  const [candidates,setCandidates]=useState(()=>initialCandidates.filter(c=>c.consentPool&&c.shareActive));
   const [filter,setFilter]=useState({location:"",industry:"",years:"",field:"",activelyExploring:""});
   const [selected,setSelected]=useState(null);
   const [showContactForm,setShowContactForm]=useState(false);
@@ -2417,16 +2465,16 @@ function PostJobPage({onBack,onSuccess,company,session}){
 }
 
 // ── JOBS ───────────────────────────────────────────────────────────────────────
-function JobsPage({onApply,session}){
-  const [jobs,setJobs]=useState([]);
-  const [companies,setCompanies]=useState([]);
+function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApplications=[]}){
+  const [jobs,setJobs]=useState(()=>initialJobs.filter(j=>j.status==="active"));
+  const [companies,setCompanies]=useState(initialCompanies);
   const [filter,setFilter]=useState({location:"",industry:"",years:"",field:""});
   const [selected,setSelected]=useState(null);
   const [form,setForm]=useState({name:"",email:"",phone:"",cvLink:"",portfolio:"",salary:"",onboard:"",consent:false});
   const [errors,setErrors]=useState({});
   const [submitted,setSubmitted]=useState(false);
   const [alreadyApplied,setAlreadyApplied]=useState(false);
-  const [appliedCodes,setAppliedCodes]=useState(new Set());
+  const [appliedCodes,setAppliedCodes]=useState(()=>new Set(initialApplications.filter(a=>a.candidateCode===session.code||(a.email&&a.email.toLowerCase()===session.email.toLowerCase())).map(a=>a.jobCode)));
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
 
   const load=async()=>{
@@ -3008,6 +3056,8 @@ function App(){
   const [refresh,setRefresh]=useState(0);
   const [notifCount,setNotifCount]=useState(0);
   const [showSync,setShowSync]=useState(false);
+  const [navigationData,setNavigationData]=useState(null);
+  const menuNavigationId=useRef(0);
   const isAdmin=typeof window!=="undefined"&&window.location.hash==="#admin";
   const bump=useCallback(()=>setRefresh(r=>r+1),[]);
 
@@ -3069,6 +3119,47 @@ function App(){
     const interval=setInterval(checkNotifs,20000);
     return ()=>clearInterval(interval);
   },[refresh,session]);
+
+  const navigateMenu=useCallback(async destination=>{
+    if(destination===page)return;
+    startGlobalLoadingOperation();
+    const navigationId=++menuNavigationId.current;
+    try{
+      let nextData=null;
+
+      if(destination==="public"){
+        const candidates=await ld(SK.CANDIDATES,true,true);
+        nextData={destination,candidates:candidates||[]};
+      }else if(destination==="jobs"){
+        const [jobs,applications,companies]=await Promise.all([
+          ld(SK.JOBS,true,true),
+          ld(SK.APPLICATIONS,true,true),
+          ld(SK.COMPANIES,true,true)
+        ]);
+        nextData={destination,jobs:jobs||[],applications:applications||[],companies:companies||[]};
+      }else if(destination==="candidate"&&role==="jobseeker"){
+        await Promise.all([
+          ld(SK.CANDIDATES,true,true),
+          ld(SK.REQUESTS,true,true),
+          ld(SK.APPLICATIONS,true,true)
+        ]);
+      }else if(destination==="employer"&&role==="employer"){
+        await Promise.all([
+          ld(SK.JOBS,true,true),
+          ld(SK.REQUESTS,true,true),
+          ld(SK.APPLICATIONS,true,true),
+          ld(SK.CANDIDATES,true,true)
+        ]);
+      }
+
+      if(navigationId!==menuNavigationId.current)return;
+      setNavigationData(nextData);
+      setPage(destination);
+      await waitForReactCommit();
+    }finally{
+      finishGlobalLoadingOperation();
+    }
+  },[page,role]);
 
   const openNotifs=()=>{ if(page!=="notifications"){ setPrevPage(page); setPage("notifications"); } };
 
@@ -3133,10 +3224,10 @@ function App(){
         input:focus,select:focus,textarea:focus{border-color:${BRAND};box-shadow:0 0 0 3px ${BRAND}18;}
         select{width:auto;}
       `}</style>
-      <Nav page={page} setPage={setPage} notifCount={notifCount} role={role} onLogout={logout} onDeleteAccount={deleteAccount} onOpenSync={()=>setShowSync(true)} showSync={isAdmin} onOpenNotifs={openNotifs}/>
+      <Nav page={page} onNavigate={navigateMenu} notifCount={notifCount} role={role} onLogout={logout} onDeleteAccount={deleteAccount} onOpenSync={()=>setShowSync(true)} showSync={isAdmin} onOpenNotifs={openNotifs}/>
       {page==="candidate"&&role==="jobseeker"&&<CandidatePage onSubmit={bump} refresh={refresh} session={session}/>}
-      {page==="public"&&<PublicPage onRequest={bump} session={session} company={company}/>}
-      {page==="jobs"&&<JobsPage onApply={bump} session={session}/>}
+      {page==="public"&&<PublicPage onRequest={bump} session={session} company={company} initialCandidates={navigationData?.destination==="public"?navigationData.candidates:[]}/>}
+      {page==="jobs"&&<JobsPage onApply={bump} session={session} initialJobs={navigationData?.destination==="jobs"?navigationData.jobs:[]} initialCompanies={navigationData?.destination==="jobs"?navigationData.companies:[]} initialApplications={navigationData?.destination==="jobs"?navigationData.applications:[]}/>}
       {page==="employer"&&role==="employer"&&<EmployerPage onPost={bump} refresh={refresh} session={session} company={company} onCompanyUpdated={setCompany}/>}
       {page==="notifications"&&<NotificationsPage onRefresh={bump} role={role} session={session} onBack={()=>setPage(prevPage)}/>}
       {showSync&&<SyncSettingsModal onClose={()=>setShowSync(false)}/>}
