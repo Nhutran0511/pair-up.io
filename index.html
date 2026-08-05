@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-03-upsert-fast-writes";
+const APP_BUILD="2026-08-05-admin-dashboard-visits";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -289,6 +289,25 @@ async function sendAutomationEmail(to,subject,body){
     await fetch(url,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"send_email",to,subject,body})});
     return true;
   }catch(e){ console.error("Automation email failed",e); return false; }
+}
+
+async function trackWebsiteVisit(){
+  try{
+    const url=await getSheetUrl();
+    if(!url) return;
+    await fetch(url,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"track_visit"})});
+  }catch(e){ console.error("Visit tracking failed",e); }
+}
+
+async function loadDashboardStats(){
+  try{
+    const url=await getSheetUrl();
+    if(!url) return null;
+    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"dashboard_stats"})});
+    const text=await res.text();
+    const data=JSON.parse(text);
+    return data&&data.success&&data.stats?data.stats:null;
+  }catch(e){ console.error("Dashboard stats failed",e); return null; }
 }
 
 // ── AUTH VIA GOOGLE SHEET (Apps Script bridge) ────────────────────────────────
@@ -1160,18 +1179,23 @@ function AdminGate(){
 
 // ── ADMIN (talent pool & jobs moderation, #admin only) ────────────────────────
 function AdminPage(){
-  const [tab,setTab]=useState("candidates");
+  const [tab,setTab]=useState("dashboard");
   const [candidates,setCandidates]=useState([]);
   const [jobs,setJobs]=useState([]);
   const [companies,setCompanies]=useState([]);
+  const [stats,setStats]=useState(null);
   const [viewing,setViewing]=useState(null); // {kind:"candidate"|"job", data}
   const [showSync,setShowSync]=useState(false);
   const [loading,setLoading]=useState(true);
 
   const load=async()=>{
     setLoading(true);
-    const {c,j,co}=await ldMany({c:SK.CANDIDATES,j:SK.JOBS,co:SK.COMPANIES});
-    setCandidates(c||[]);setJobs(j||[]);setCompanies(co||[]);
+    const [sharedData,dashboardStats]=await Promise.all([
+      ldMany({c:SK.CANDIDATES,j:SK.JOBS,co:SK.COMPANIES}),
+      loadDashboardStats()
+    ]);
+    setCandidates(sharedData.c||[]);setJobs(sharedData.j||[]);setCompanies(sharedData.co||[]);
+    setStats(dashboardStats);
     setLoading(false);
   };
   useEffect(()=>{load();},[]);
@@ -1202,7 +1226,7 @@ function AdminPage(){
         <div style={{color:"#fff",fontWeight:800,fontSize:22,letterSpacing:-1.2,marginRight:"1.5rem",paddingTop:14,paddingBottom:14,whiteSpace:"nowrap"}}>
           <span style={{opacity:0.45,fontWeight:400}}>pair</span><span style={{fontWeight:800}}>up</span> <span style={{opacity:.7,fontWeight:600,fontSize:14}}>· Admin</span>
         </div>
-        {[["candidates","Talent Pool","users"],["jobs","Jobs","briefcase"]].map(([id,label,icon])=>(
+        {[["dashboard","Dashboard","chart-bar"],["candidates","Talent Pool","users"],["jobs","Jobs","briefcase"]].map(([id,label,icon])=>(
           <button key={id} onClick={()=>setTab(id)} style={{background:"none",border:"none",cursor:"pointer",color:tab===id?"#fff":"rgba(255,255,255,0.58)",fontWeight:tab===id?700:400,fontSize:13,padding:"16px 14px",borderBottom:tab===id?"2px solid #7BA7F5":"2px solid transparent",display:"flex",alignItems:"center",gap:6}}>
             <Icon name={icon} size={15}/>{label}
           </button>
@@ -1217,13 +1241,35 @@ function AdminPage(){
 
       <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem"}}>
         <h1 style={{fontSize:24,fontWeight:800,margin:"0 0 4px",color:BRAND}}>Admin</h1>
-        <p style={{color:"var(--color-text-secondary)",fontSize:13,margin:"0 0 4px"}}>View and remove any job seeker or employer listing on the platform. Deletions are permanent.</p>
+        <p style={{color:"var(--color-text-secondary)",fontSize:13,margin:"0 0 4px"}}>Monitor platform activity and manage job seeker or employer listings. Deletions are permanent.</p>
         <p style={{color:"var(--color-text-secondary)",fontSize:11,margin:"0 0 1.5rem",fontFamily:"monospace"}}>Build: {APP_BUILD}</p>
 
         {loading?(
           <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,padding:"4rem"}}><Icon name="loader-2" size={26} style={{color:BRAND,animation:"spin 1s linear infinite"}}/><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>PairUp is loading, please wait...</p></div>
         ):(
         <>
+        {tab==="dashboard"&&(
+          stats?(
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16}}>
+              {[
+                ["Total website visits",stats.totalVisits,"world"],
+                ["Registered job seekers",stats.totalJobSeekers,"user-search"],
+                ["Registered employers",stats.totalEmployers,"building"],
+                ["Total applications",stats.totalApplications,"file-text"],
+                ["Successful applicants",stats.totalPassed,"circle-check"]
+              ].map(([label,value,icon])=>(
+                <div key={label} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16,padding:"1.25rem",boxShadow:"0 6px 18px rgba(0,44,118,0.05)"}}>
+                  <div style={{width:40,height:40,borderRadius:12,background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:14}}><Icon name={icon} size={20} style={{color:BRAND}}/></div>
+                  <p style={{fontSize:28,fontWeight:800,color:BRAND,margin:"0 0 5px"}}>{Number(value||0).toLocaleString()}</p>
+                  <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0,fontWeight:600}}>{label}</p>
+                </div>
+              ))}
+            </div>
+          ):(
+            <div style={{background:"#FFF7E6",border:"1px solid #F5C76D",borderRadius:14,padding:"1rem",fontSize:13,color:"#7A4D00"}}>Dashboard statistics could not be loaded. Confirm the latest Apps Script version is deployed, then refresh.</div>
+          )
+        )}
+
         {tab==="candidates"&&(
           <div style={{overflowX:"auto",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
@@ -1436,9 +1482,23 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
   };
 
   const doRespond=async(req,action)=>{
-    await saveOne(SK.REQUESTS,{...req,status:action},"id");
-    await saveOne(SK.NOTIFS,{id:gid(),type:"response",to:req.employerEmail||"employer",candidateCode:profile.code,companyName:req.company,position:req.title,action,createdAt:new Date().toISOString(),read:false},"id");
-    setRequests(r=>r.map(x=>x.id===req.id?{...x,status:action}:x));
+    const respondedAt=new Date().toISOString();
+    const updatedRequest={...req,status:action,respondedAt};
+    const requestSaved=await saveOne(SK.REQUESTS,updatedRequest,"id");
+    const notificationSaved=await saveOne(SK.NOTIFS,{id:gid(),type:"response",to:req.employerEmail||"employer",candidateCode:profile.code,companyName:req.company,position:req.title,action,createdAt:respondedAt,read:false},"id");
+    if(requestSaved&&notificationSaved&&req.employerEmail){
+      const result=action==="accepted"?"Accepted":"Declined";
+      await sendAutomationEmail(
+        req.employerEmail,
+        `Candidate ${profile.code} ${result.toLowerCase()} your contact request`,
+        `Candidate code: ${profile.code}
+Position: ${req.title||"—"}
+Company: ${req.company||"—"}
+Result: ${result}
+Response timestamp: ${respondedAt}`
+      );
+    }
+    setRequests(r=>r.map(x=>x.id===req.id?updatedRequest:x));
     setSelReq(null);onSubmit();
   };
 
@@ -2796,6 +2856,9 @@ function App(){
   const [showSync,setShowSync]=useState(false);
   const isAdmin=typeof window!=="undefined"&&window.location.hash==="#admin";
   const bump=useCallback(()=>setRefresh(r=>r+1),[]);
+
+  // Count one visit for this full document load. SPA navigation does not remount App.
+  useEffect(()=>{trackWebsiteVisit();},[]);
 
   // Restore session on load (checks both "remembered" (7-day) and session-only storage)
   useEffect(()=>{
