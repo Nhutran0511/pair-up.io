@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-05-delayed-global-loading-overlay";
+const APP_BUILD="2026-08-05-1s-loading-admin-fresh-tabs";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -421,7 +421,7 @@ const Btn=({children,onClick,variant="primary",style={},...p})=>{
   return <button onClick={onClick} style={{...base,...v[variant],...style}} {...p}>{children}</button>;
 };
 
-const GLOBAL_LOADING_DELAY_MS=3000;
+const GLOBAL_LOADING_DELAY_MS=1000;
 const GLOBAL_LOADING_MIN_MS=400;
 const GLOBAL_LOADING_LOCAL_MS=450;
 const GLOBAL_LOADING_REQUEST_GRACE_MS=180;
@@ -482,7 +482,7 @@ function GlobalInteractionLoading(){
       },GLOBAL_LOADING_REQUEST_GRACE_MS);
       scheduleHide(GLOBAL_LOADING_REQUEST_GRACE_MS);
     };
-    const startInteraction=()=>{
+    const startInteraction=isImmediate=>{
       isInteractionActive=true;
       isInteractionWindowOpen=true;
       isRequestChainOpen=false;
@@ -493,12 +493,17 @@ function GlobalInteractionLoading(){
       clearTimer(hideTimeout);
       clearTimer(requestGraceTimeout);
       clearTimer(maximumTimeout);
-      loadingDelayTimeout=setTimeout(()=>{
-        loadingDelayTimeout=null;
-        if(!isInteractionActive)return;
+      if(isImmediate){
         shownAt=Date.now();
         if(isMounted)setIsVisible(true);
-      },GLOBAL_LOADING_DELAY_MS);
+      }else{
+        loadingDelayTimeout=setTimeout(()=>{
+          loadingDelayTimeout=null;
+          if(!isInteractionActive)return;
+          shownAt=Date.now();
+          if(isMounted)setIsVisible(true);
+        },GLOBAL_LOADING_DELAY_MS);
+      }
       interactionWindowTimeout=setTimeout(()=>{
         isInteractionWindowOpen=false;
       },0);
@@ -512,7 +517,7 @@ function GlobalInteractionLoading(){
       if(!(target instanceof Element))return;
       const button=target.closest("button");
       if(!button||button.disabled||button.matches(":disabled")||button.getAttribute("aria-disabled")==="true")return;
-      startInteraction();
+      startInteraction(button.dataset.loadingImmediate==="true");
     };
 
     const originalFetch=window.fetch;
@@ -1334,6 +1339,21 @@ function AdminPage(){
   };
   useEffect(()=>{load();},[]);
 
+  const selectAdminTab=async destination=>{
+    if(destination==="candidates"){
+      const freshCandidates=await ld(SK.CANDIDATES,true,true);
+      setCandidates(freshCandidates||[]);
+    }else if(destination==="jobs"){
+      const [freshJobs,freshCompanies]=await Promise.all([
+        ld(SK.JOBS,true,true),
+        ld(SK.COMPANIES,true,true)
+      ]);
+      setJobs(freshJobs||[]);
+      setCompanies(freshCompanies||[]);
+    }
+    setTab(destination);
+  };
+
   const companyName=code=>companies.find(co=>co.code===code)?.name||"—";
 
   const deleteCandidate=async(c)=>{
@@ -1361,7 +1381,7 @@ function AdminPage(){
           <span style={{opacity:0.45,fontWeight:400}}>pair</span><span style={{fontWeight:800}}>up</span> <span style={{opacity:.7,fontWeight:600,fontSize:14}}>· Admin</span>
         </div>
         {[["dashboard","Dashboard","chart-bar"],["candidates","Talent Pool","users"],["jobs","Jobs","briefcase"]].map(([id,label,icon])=>(
-          <button key={id} onClick={()=>setTab(id)} style={{background:"none",border:"none",cursor:"pointer",color:tab===id?"#fff":"rgba(255,255,255,0.58)",fontWeight:tab===id?700:400,fontSize:13,padding:"16px 14px",borderBottom:tab===id?"2px solid #7BA7F5":"2px solid transparent",display:"flex",alignItems:"center",gap:6}}>
+          <button key={id} data-loading-immediate={id==="candidates"||id==="jobs"?"true":undefined} onClick={()=>selectAdminTab(id)} style={{background:"none",border:"none",cursor:"pointer",color:tab===id?"#fff":"rgba(255,255,255,0.58)",fontWeight:tab===id?700:400,fontSize:13,padding:"16px 14px",borderBottom:tab===id?"2px solid #7BA7F5":"2px solid transparent",display:"flex",alignItems:"center",gap:6}}>
             <Icon name={icon} size={15}/>{label}
           </button>
         ))}
