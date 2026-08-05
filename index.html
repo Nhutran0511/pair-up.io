@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-05-global-loading-overlay";
+const APP_BUILD="2026-08-05-delayed-global-loading-overlay";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -421,6 +421,7 @@ const Btn=({children,onClick,variant="primary",style={},...p})=>{
   return <button onClick={onClick} style={{...base,...v[variant],...style}} {...p}>{children}</button>;
 };
 
+const GLOBAL_LOADING_DELAY_MS=3000;
 const GLOBAL_LOADING_MIN_MS=400;
 const GLOBAL_LOADING_LOCAL_MS=450;
 const GLOBAL_LOADING_REQUEST_GRACE_MS=180;
@@ -437,6 +438,7 @@ function GlobalInteractionLoading(){
     let pendingRequests=0;
     let shownAt=0;
     let interactionWindowTimeout=null;
+    let loadingDelayTimeout=null;
     let localTimeout=null;
     let hideTimeout=null;
     let requestGraceTimeout=null;
@@ -451,11 +453,13 @@ function GlobalInteractionLoading(){
       isRequestChainOpen=false;
       pendingRequests=0;
       clearTimer(interactionWindowTimeout);
+      clearTimer(loadingDelayTimeout);
       clearTimer(localTimeout);
       clearTimer(hideTimeout);
       clearTimer(requestGraceTimeout);
       clearTimer(maximumTimeout);
       interactionWindowTimeout=null;
+      loadingDelayTimeout=null;
       localTimeout=null;
       hideTimeout=null;
       requestGraceTimeout=null;
@@ -482,13 +486,19 @@ function GlobalInteractionLoading(){
       isInteractionActive=true;
       isInteractionWindowOpen=true;
       isRequestChainOpen=false;
-      shownAt=Date.now();
+      shownAt=0;
       clearTimer(interactionWindowTimeout);
+      clearTimer(loadingDelayTimeout);
       clearTimer(localTimeout);
       clearTimer(hideTimeout);
       clearTimer(requestGraceTimeout);
       clearTimer(maximumTimeout);
-      if(isMounted)setIsVisible(true);
+      loadingDelayTimeout=setTimeout(()=>{
+        loadingDelayTimeout=null;
+        if(!isInteractionActive)return;
+        shownAt=Date.now();
+        if(isMounted)setIsVisible(true);
+      },GLOBAL_LOADING_DELAY_MS);
       interactionWindowTimeout=setTimeout(()=>{
         isInteractionWindowOpen=false;
       },0);
