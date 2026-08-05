@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-03-perf-loading-msg";
+const APP_BUILD="2026-08-03-upsert-fast-writes";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -111,6 +111,41 @@ async function ldForWrite(key){
   }
   return v;
 }
+// Preferred way to add/update ONE item in a shared table (a job, a candidate
+// profile, a request...). Updates the local cache immediately (so the UI feels
+// instant) and fires a single-row "upsert" to the Sheet in the background — one
+// network round trip total, versus the old read-the-whole-table-then-write-it-
+// all-back pattern (ldForWrite + sd(...,true)), which cost two round trips and
+// rewrote every row just to change one. Falls back to that older safer-but-
+// slower pattern automatically wherever a change genuinely touches many rows at
+// once (see the "apply benefits to all jobs" bulk-edit option, for example).
+async function saveOne(skKey,item,keyField){
+  try{
+    const raw=localStorage.getItem(skKey);
+    const arr=raw?JSON.parse(raw):[];
+    const idx=arr.findIndex(x=>x[keyField]===item[keyField]);
+    if(idx>=0)arr[idx]=item; else arr.push(item);
+    localStorage.setItem(skKey,JSON.stringify(arr));
+  }catch(e){}
+  const map=SHEET_MAP[skKey];
+  if(!map)return true;
+  const ok=await sheetUpsert(map.sheet,item,keyField);
+  if(!ok) console.warn(`saveOne: upsert failed for "${map.sheet}" — local cache still updated, will retry to sync on next successful read/write.`);
+  return ok;
+}
+// Preferred way to remove ONE item from a shared table. Same trade-off as saveOne.
+async function deleteOne(skKey,keyField,keyValue){
+  try{
+    const raw=localStorage.getItem(skKey);
+    const arr=raw?JSON.parse(raw):[];
+    localStorage.setItem(skKey,JSON.stringify(arr.filter(x=>x[keyField]!==keyValue)));
+  }catch(e){}
+  const map=SHEET_MAP[skKey];
+  if(!map)return true;
+  const ok=await sheetDeleteRow(map.sheet,keyField,keyValue);
+  if(!ok) console.warn(`deleteOne: delete failed for "${map.sheet}" — local cache still updated, will retry to sync on next successful read/write.`);
+  return ok;
+}
 async function nextCode(){const n=(await ld(SK.COUNTER,true))||0;const nx=n+1;await sd(SK.COUNTER,nx,true);return`#JS${String(nx).padStart(4,"0")}`;}
 function gid(){return Math.random().toString(36).substring(2,10).toUpperCase();}
 function gjid(){return"JD"+Math.random().toString(36).substring(2,8).toUpperCase();}
@@ -170,6 +205,36 @@ async function sheetReplaceAll(sheetName,rows,keyField){
     delete _sheetCache[sheetName]; // this sheet just changed — next read must be fresh
     return !!(data&&data.success);
   }catch(e){ console.error(`Sheet replace failed for "${sheetName}"`,e); return false; }
+}
+
+// Fast path for "add or update ONE item" (save a job, a profile, a request...).
+// Unlike sd(SK.X, wholeArray, true), this needs no prior read — the server finds
+// and overwrites (or appends) the matching row itself — so it's a single round
+// trip instead of read-then-rewrite-everything, and only touches one row instead
+// of the whole sheet.
+async function sheetUpsert(sheetName,data,keyField){
+  try{
+    const url=await getSheetUrl();
+    if(!url) return false;
+    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"upsert",sheet:sheetName,data,keyField})});
+    const text=await res.text();
+    let result; try{ result=JSON.parse(text); }catch(e){ return false; }
+    delete _sheetCache[sheetName];
+    return !!(result&&result.success);
+  }catch(e){ console.error(`Sheet upsert failed for "${sheetName}"`,e); return false; }
+}
+// Fast path for "remove ONE item" (delete a job, a candidate...). Same idea as
+// sheetUpsert — no prior read needed, only the matching row is touched.
+async function sheetDeleteRow(sheetName,keyField,keyValue){
+  try{
+    const url=await getSheetUrl();
+    if(!url) return false;
+    const res=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"delete_row",sheet:sheetName,keyField,keyValue})});
+    const text=await res.text();
+    let result; try{ result=JSON.parse(text); }catch(e){ return false; }
+    delete _sheetCache[sheetName];
+    return !!(result&&result.success);
+  }catch(e){ console.error(`Sheet delete_row failed for "${sheetName}"`,e); return false; }
 }
 
 // Batches several "list" reads into ONE HTTP round-trip. Each parallel-but-separate
@@ -913,11 +978,7 @@ function CompanyProfilePage({session,onSaved,existing}){
   const submit=async()=>{
     const e=validate();if(Object.keys(e).length){setErrors(e);return;}
     const company={...form,code:session.code,email:session.email,createdAt:new Date().toISOString()};
-    const all=await ldForWrite(SK.COMPANIES);
-    if(all===null)return;
-    const i=all.findIndex(c=>c.code===session.code);
-    if(i>=0)all[i]=company;else all.push(company);
-    await sd(SK.COMPANIES,all,true);
+    await saveOne(SK.COMPANIES,company,"code");
     onSaved(company);
   };
 
@@ -1119,18 +1180,14 @@ function AdminPage(){
 
   const deleteCandidate=async(c)=>{
     if(!window.confirm(`Delete candidate ${c.code} (${c.position||"no title"})? This permanently removes their talent pool profile. This cannot be undone.`))return;
-    const all=await ldForWrite(SK.CANDIDATES);
-    if(all===null)return;
-    await sd(SK.CANDIDATES,all.filter(x=>x.code!==c.code),true);
+    await deleteOne(SK.CANDIDATES,"code",c.code);
     setViewing(null);
     load();
   };
 
   const deleteJob=async(j)=>{
     if(!window.confirm(`Delete job ${j.code} (${j.title||"no title"})? This permanently removes the listing. This cannot be undone.`))return;
-    const all=await ldForWrite(SK.JOBS);
-    if(all===null)return;
-    await sd(SK.JOBS,all.filter(x=>x.code!==j.code),true);
+    await deleteOne(SK.JOBS,"code",j.code);
     setViewing(null);
     load();
   };
@@ -1328,12 +1385,7 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
   // ── Helpers ──
   const persist=async(c)=>{
     await sd(LKEY,c);
-    const all=await ldForWrite(SK.CANDIDATES);
-    if(all===null)return false;
-    const i=all.findIndex(x=>x.code===c.code);
-    if(i>=0)all[i]=c;else all.push(c);
-    await sd(SK.CANDIDATES,all,true);
-    return true;
+    return await saveOne(SK.CANDIDATES,c,"code");
   };
 
   const validate=()=>{
@@ -1384,14 +1436,8 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
   };
 
   const doRespond=async(req,action)=>{
-    const all=await ldForWrite(SK.REQUESTS);
-    if(all===null)return;
-    const i=all.findIndex(r=>r.id===req.id);
-    if(i>=0){all[i].status=action;await sd(SK.REQUESTS,all,true);}
-    const notifs=await ldForWrite(SK.NOTIFS);
-    if(notifs===null)return;
-    notifs.push({id:gid(),type:"response",to:req.employerEmail||"employer",candidateCode:profile.code,companyName:req.company,position:req.title,action,createdAt:new Date().toISOString(),read:false});
-    await sd(SK.NOTIFS,notifs,true);
+    await saveOne(SK.REQUESTS,{...req,status:action},"id");
+    await saveOne(SK.NOTIFS,{id:gid(),type:"response",to:req.employerEmail||"employer",candidateCode:profile.code,companyName:req.company,position:req.title,action,createdAt:new Date().toISOString(),read:false},"id");
     setRequests(r=>r.map(x=>x.id===req.id?{...x,status:action}:x));
     setSelReq(null);onSubmit();
   };
@@ -1855,13 +1901,8 @@ function PublicPage({onRequest,session,company}){
     if(!reqForm.jd.trim())e.jd="Required";
     if(Object.keys(e).length){setReqErrors(e);return;}
     const req={id:gid(),candidateCode:selected.code,employerEmail:session?.email||null,companyCode:session?.code||null,...reqForm,createdAt:new Date().toISOString(),status:"pending"};
-    const existing=await ldForWrite(SK.REQUESTS);
-    if(existing===null)return;
-    await sd(SK.REQUESTS,[...existing,req],true);
-    const notifs=await ldForWrite(SK.NOTIFS);
-    if(notifs===null)return;
-    notifs.push({id:gid(),type:"contact_request",to:selected.code,company:reqForm.company,title:reqForm.title,message:`${reqForm.company} has sent you a contact request for the role of ${reqForm.title}`,detail:req,createdAt:new Date().toISOString(),read:false});
-    await sd(SK.NOTIFS,notifs,true);
+    await saveOne(SK.REQUESTS,req,"id");
+    await saveOne(SK.NOTIFS,{id:gid(),type:"contact_request",to:selected.code,company:reqForm.company,title:reqForm.title,message:`${reqForm.company} has sent you a contact request for the role of ${reqForm.title}`,detail:req,createdAt:new Date().toISOString(),read:false},"id");
     if(selected.email){
       sendAutomationEmail(
         selected.email,
@@ -2043,11 +2084,8 @@ function PostJobPage({onBack,onSuccess,company,session}){
   const saveBenefits=async()=>{
     await sd(BENEFITS_KEY,form.benefits); // instant local cache
     setBenefitsSaved(true);
-    if(session?.code){
-      const all=await ldForWrite(SK.COMPANIES);
-      if(all===null)return; // network hiccup — local cache above still works for this tab
-      const idx=all.findIndex(c=>c.code===session.code);
-      if(idx>=0){ all[idx]={...all[idx],savedBenefits:form.benefits}; await sd(SK.COMPANIES,all,true); }
+    if(session?.code&&company){
+      await saveOne(SK.COMPANIES,{...company,savedBenefits:form.benefits},"code");
     }
   };
 
@@ -2065,18 +2103,21 @@ function PostJobPage({onBack,onSuccess,company,session}){
     if(Object.keys(e).length){setErrors(e);return;}
     const code=gjid();
     const job={...form,code,companyCode:session?.code||null,companyEmail:session?.email||null,createdAt:new Date().toISOString(),status:"active",recruitmentProcess:form.recruitmentProcess?.length?form.recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))};
-    const ex=await ldForWrite(SK.JOBS);
-    if(ex===null)return;
-    if(applyBenefitsToAll && form.benefits.trim()) await sd(BENEFITS_KEY,form.benefits);
-    const jobsToSave=applyBenefitsToAll && form.benefits.trim()
-      ? ex.map(existing=>existing.companyCode===session?.code?{...existing,benefits:form.benefits}:existing)
-      : ex;
-    await sd(SK.JOBS,[...jobsToSave,job],true);
+
+    if(applyBenefitsToAll && form.benefits.trim()){
+      // Genuinely touches many rows at once, so this one still needs the
+      // read-everything-then-rewrite-everything path — upsert only helps
+      // when a single row is changing.
+      await sd(BENEFITS_KEY,form.benefits);
+      const ex=await ldForWrite(SK.JOBS);
+      if(ex===null)return;
+      const jobsToSave=ex.map(existing=>existing.companyCode===session?.code?{...existing,benefits:form.benefits}:existing);
+      await sd(SK.JOBS,[...jobsToSave,job],true);
+    }else{
+      await saveOne(SK.JOBS,job,"code");
+    }
     // Push notification
-    const notifs=await ldForWrite(SK.NOTIFS);
-    if(notifs===null)return;
-    notifs.push({id:gid(),type:"job_posted",to:session?.email||"employer",message:`Job posted: ${form.title} at ${form.company}`,jobCode:code,company:form.company,title:form.title,createdAt:new Date().toISOString(),read:false});
-    await sd(SK.NOTIFS,notifs,true);
+    await saveOne(SK.NOTIFS,{id:gid(),type:"job_posted",to:session?.email||"employer",message:`Job posted: ${form.title} at ${form.company}`,jobCode:code,company:form.company,title:form.title,createdAt:new Date().toISOString(),read:false},"id");
     setDone(code);onSuccess();
   };
 
@@ -2225,16 +2266,12 @@ function JobsPage({onApply,session}){
     if(!form.consent)e.consent="You must agree before applying";
     if(Object.keys(e).length){setErrors(e);return;}
     const profile=await ld("pairup_my_profile_"+session.email);
-    const existing=await ldForWrite(SK.APPLICATIONS);
-    if(existing===null)return;
+    const existing=(await ld(SK.APPLICATIONS,true))||[]; // read-only duplicate check; the write below is a safe single-row upsert regardless
     const duplicate=existing.find(a=>a.jobCode===selected.code && (a.candidateCode===session.code||(a.email===form.email)));
     if(duplicate){setAlreadyApplied(true);setAppliedCodes(prev=>new Set([...prev,selected.code]));return;}
     const application={id:gid(),jobCode:selected.code,jobTitle:selected.title,company:selected.company,companyEmail:selected.companyEmail||null,candidateCode:session.code,profileSnapshot:profile||null,...form,createdAt:new Date().toISOString(),status:"applied",profileEvents:[]};
-    await sd(SK.APPLICATIONS,[...existing,application],true);
-    const notifs=await ldForWrite(SK.NOTIFS);
-    if(notifs===null)return;
-    notifs.push({id:gid(),type:"application",to:selected.companyEmail||"employer",message:`New application for ${selected.title} at ${selected.company}`,title:selected.title,company:selected.company,applicationId:application.id,candidateCode:application.candidateCode,createdAt:new Date().toISOString(),read:false});
-    await sd(SK.NOTIFS,notifs,true);
+    await saveOne(SK.APPLICATIONS,application,"id");
+    await saveOne(SK.NOTIFS,{id:gid(),type:"application",to:selected.companyEmail||"employer",message:`New application for ${selected.title} at ${selected.company}`,title:selected.title,company:selected.company,applicationId:application.id,candidateCode:application.candidateCode,createdAt:new Date().toISOString(),read:false},"id");
     setAlreadyApplied(true);setAppliedCodes(prev=>new Set([...prev,selected.code]));setSubmitted(true);onApply();
   };
 
@@ -2349,13 +2386,11 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   // that — even after navigating away and back, or reloading — it stays masked.
   const openRequest=async(r)=>{
     if(r.status==="accepted"&&!r.viewedByEmployer){
-      const all=await ldForWrite(SK.REQUESTS);
-      if(all===null)return;
-      const idx=all.findIndex(x=>x.id===r.id);
       const viewedAt=new Date().toISOString();
-      if(idx>=0){ all[idx]={...all[idx],viewedByEmployer:true,viewedAt}; await sd(SK.REQUESTS,all,true); }
-      setRequestsAll(all);
-      setViewingRequest({...r,viewedByEmployer:true,viewedAt,__firstView:true});
+      const updated={...r,viewedByEmployer:true,viewedAt};
+      await saveOne(SK.REQUESTS,updated,"id");
+      setRequestsAll(all=>all.map(x=>x.id===r.id?updated:x));
+      setViewingRequest({...updated,__firstView:true});
     }else{
       setViewingRequest(r);
     }
@@ -2370,22 +2405,19 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   });
 
   const saveJob=async(updated)=>{
-    const all=await ldForWrite(SK.JOBS);
-    if(all===null)return;
-    const idx=all.findIndex(j=>j.code===updated.code);
-    if(idx>=0)all[idx]=updated; else all.push(updated);
-    await sd(SK.JOBS,all,true);
-    setJobsAll(all);setSelectedJob(updated);onPost();
+    await saveOne(SK.JOBS,updated,"code");
+    setJobsAll(all=>{
+      const idx=all.findIndex(j=>j.code===updated.code);
+      if(idx>=0){ const copy=[...all]; copy[idx]=updated; return copy; }
+      return [...all,updated];
+    });
+    setSelectedJob(updated);onPost();
   };
 
   const toggleJobStatus=async(job)=>{
     const updated={...job,status:job.status==="active"?"inactive":"active"};
-    const all=await ldForWrite(SK.JOBS);
-    if(all===null)return;
-    const idx=all.findIndex(j=>j.code===job.code);
-    if(idx>=0)all[idx]=updated; else all.push(updated);
-    await sd(SK.JOBS,all,true);
-    setJobsAll(all);
+    await saveOne(SK.JOBS,updated,"code");
+    setJobsAll(all=>all.map(j=>j.code===job.code?updated:j));
     if(selectedJob?.code===job.code)setSelectedJob(updated);
     onPost();
   };
@@ -2399,11 +2431,10 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   };
 
   const updateApplication=async(app,patch)=>{
-    const all=await ldForWrite(SK.APPLICATIONS);
-    if(all===null)return;
-    const idx=all.findIndex(a=>a.id===app.id); if(idx<0)return;
-    all[idx]={...all[idx],...patch,updatedAt:new Date().toISOString()};
-    await sd(SK.APPLICATIONS,all,true);setApplications(all);onPost();
+    const updated={...app,...patch,updatedAt:new Date().toISOString()};
+    await saveOne(SK.APPLICATIONS,updated,"id");
+    setApplications(all=>all.map(a=>a.id===app.id?updated:a));
+    onPost();
   };
 
   const moveCandidate=async(app,round,status,reason,note)=>{
@@ -2840,13 +2871,11 @@ function App(){
       const accounts=((await ld(SK.ACCOUNTS_JS,true))||[]).filter(a=>a.email.toLowerCase()!==session.email.toLowerCase());
       await sd(SK.ACCOUNTS_JS,accounts,true);
       await sd("pairup_my_profile_"+session.email,null,true);
-      const candidates=await ldForWrite(SK.CANDIDATES);
-      if(candidates!==null) await sd(SK.CANDIDATES,candidates.filter(c=>c.code!==session.code),true);
+      await deleteOne(SK.CANDIDATES,"code",session.code);
     }else{
       const accounts=((await ld(SK.ACCOUNTS_EMP,true))||[]).filter(a=>a.email.toLowerCase()!==session.email.toLowerCase());
       await sd(SK.ACCOUNTS_EMP,accounts,true);
-      const companies=await ldForWrite(SK.COMPANIES);
-      if(companies!==null) await sd(SK.COMPANIES,companies.filter(c=>c.code!==session.code),true);
+      await deleteOne(SK.COMPANIES,"code",session.code);
     }
     await clearSession();
     setSession(null);setRole(null);setCompany(null);setCompanyChecked(false);
