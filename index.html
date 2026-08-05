@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-05-global-button-loading";
+const APP_BUILD="2026-08-05-global-loading-overlay";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -537,10 +537,10 @@ function GlobalInteractionLoading(){
 
   if(!isVisible)return null;
   return(
-    <div role="status" aria-live="polite" style={{position:"fixed",top:14,left:"50%",transform:"translateX(-50%)",zIndex:10000,pointerEvents:"none",display:"flex",alignItems:"center",gap:8,background:"rgba(0,44,118,.94)",color:"#fff",padding:"9px 14px",borderRadius:999,boxShadow:"0 6px 20px rgba(0,24,68,.22)",fontFamily:FONT,fontSize:12,fontWeight:700}}>
-      <Icon name="loader-2" size={16} style={{animation:"globalInteractionSpin .8s linear infinite"}}/>
-      Processing...
-      <style>{`@keyframes globalInteractionSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
+    <div role="status" aria-live="polite" aria-busy="true" style={{position:"fixed",inset:0,zIndex:10000,pointerEvents:"auto",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10,background:"rgba(232,237,247,.96)",color:"var(--color-text-secondary)",fontFamily:FONT}}>
+      <Icon name="loader-2" size={28} style={{color:BRAND,animation:"globalInteractionLoadingSpin .8s linear infinite"}}/>
+      <p style={{fontSize:13,margin:0,textAlign:"center",padding:"0 1.5rem"}}>PairUp is loading, please wait...</p>
+      <style>{`@keyframes globalInteractionLoadingSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 }
