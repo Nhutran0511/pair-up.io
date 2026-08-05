@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-05-no-content-flash-loading";
+const APP_BUILD="2026-08-05-admin-metrics-pu-codes";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -146,7 +146,7 @@ async function deleteOne(skKey,keyField,keyValue){
   if(!ok) console.warn(`deleteOne: delete failed for "${map.sheet}" — local cache still updated, will retry to sync on next successful read/write.`);
   return ok;
 }
-async function nextCode(){const n=(await ld(SK.COUNTER,true))||0;const nx=n+1;await sd(SK.COUNTER,nx,true);return`#JS${String(nx).padStart(4,"0")}`;}
+async function nextCode(){const n=(await ld(SK.COUNTER,true))||0;const nx=n+1;await sd(SK.COUNTER,nx,true);return`#PU${String(nx).padStart(4,"0")}`;}
 function gid(){return Math.random().toString(36).substring(2,10).toUpperCase();}
 function gjid(){return"JD"+Math.random().toString(36).substring(2,8).toUpperCase();}
 function fmt(iso){return iso?new Date(iso).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}):"—";}
@@ -289,6 +289,81 @@ async function sendAutomationEmail(to,subject,body){
     await fetch(url,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"send_email",to,subject,body})});
     return true;
   }catch(e){ console.error("Automation email failed",e); return false; }
+}
+
+function updateLocalSharedItem(skKey,item,keyField){
+  try{
+    const raw=localStorage.getItem(skKey);
+    const rows=raw?JSON.parse(raw):[];
+    const index=rows.findIndex(row=>row[keyField]===item[keyField]);
+    if(index>=0)rows[index]=item;else rows.push(item);
+    localStorage.setItem(skKey,JSON.stringify(rows));
+  }catch(e){}
+  const map=SHEET_MAP[skKey];
+  if(map)delete _sheetCache[map.sheet];
+}
+
+async function postCompositeAction(action,payload){
+  const url=await getSheetUrl();
+  if(!url)return {supported:true,success:false,error:"not_configured"};
+  try{
+    const response=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action,...payload})});
+    const text=await response.text();
+    let result;
+    try{result=JSON.parse(text);}catch(e){return {supported:false,success:false,error:"bad_response"};}
+    if(!result||typeof result.success!=="boolean")return {supported:false,success:false,error:"bad_response"};
+    if(result.error==="unknown_action")return {supported:false,success:false,error:"unknown_action"};
+    return {supported:true,...result};
+  }catch(e){
+    console.error(`${action} failed`,e);
+    return {supported:true,success:false,error:"network"};
+  }
+}
+
+async function submitContactRequest(request,notification,email){
+  let composite=await postCompositeAction("submit_contact_request",{request,notification,email});
+  if(composite.supported&&composite.success&&typeof composite.emailSent!=="boolean")composite={supported:false,success:false,error:"bad_response"};
+  if(composite.supported){
+    if(composite.success){
+      updateLocalSharedItem(SK.REQUESTS,request,"id");
+      updateLocalSharedItem(SK.NOTIFS,notification,"id");
+    }
+    return composite;
+  }
+  const [requestSaved,notificationSaved]=await Promise.all([saveOne(SK.REQUESTS,request,"id"),saveOne(SK.NOTIFS,notification,"id")]);
+  if(!requestSaved)return {success:false,error:"request_save_failed",fallback:true};
+  if(!notificationSaved)return {success:false,error:"notification_save_failed",fallback:true};
+  const emailSent=email?.to?await sendAutomationEmail(email.to,email.subject,email.body):false;
+  return {success:true,emailSent,fallback:true};
+}
+
+function applicationMatches(row,application){
+  const rowEmail=String(row?.email||"").trim().toLowerCase();
+  const applicationEmail=String(application.email||"").trim().toLowerCase();
+  return row?.jobCode===application.jobCode&&(row?.candidateCode===application.candidateCode||(applicationEmail&&rowEmail===applicationEmail));
+}
+
+async function submitApplication(application,notification,hasKnownDuplicate=false){
+  let composite=await postCompositeAction("submit_application",{application,notification});
+  if(composite.supported&&composite.success&&typeof composite.duplicate!=="boolean")composite={supported:false,success:false,error:"bad_response"};
+  if(composite.supported){
+    if(composite.success&&!composite.duplicate){
+      updateLocalSharedItem(SK.APPLICATIONS,application,"id");
+      updateLocalSharedItem(SK.NOTIFS,notification,"id");
+    }
+    return composite;
+  }
+  if(hasKnownDuplicate)return {success:true,duplicate:true,fallback:true};
+  let localApplications=[];
+  try{localApplications=JSON.parse(localStorage.getItem(SK.APPLICATIONS)||"[]");}catch(e){}
+  if(localApplications.some(row=>applicationMatches(row,application)))return {success:true,duplicate:true,fallback:true};
+  const freshApplications=await ld(SK.APPLICATIONS,true,true);
+  if(freshApplications===null)return {success:false,error:"duplicate_check_failed",fallback:true};
+  if(freshApplications.some(row=>applicationMatches(row,application)))return {success:true,duplicate:true,fallback:true};
+  const [applicationSaved,notificationSaved]=await Promise.all([saveOne(SK.APPLICATIONS,application,"id"),saveOne(SK.NOTIFS,notification,"id")]);
+  if(!applicationSaved)return {success:false,error:"application_save_failed",fallback:true};
+  if(!notificationSaved)return {success:false,error:"notification_save_failed",fallback:true};
+  return {success:true,duplicate:false,fallback:true};
 }
 
 async function trackWebsiteVisit(){
@@ -1458,7 +1533,11 @@ function AdminPage(){
                 ["Registered job seekers",stats.totalJobSeekers,"user-search"],
                 ["Registered employers",stats.totalEmployers,"building"],
                 ["Total applications",stats.totalApplications,"file-text"],
-                ["Successful applicants",stats.totalPassed,"circle-check"]
+                ["Successful applicants",stats.totalPassed,"circle-check"],
+                ["Total active jobs",stats.totalActiveJobs,"briefcase"],
+                ["Contact requests sent",stats.totalContactRequests,"send"],
+                ["Accepted contact requests",stats.totalAcceptedRequests,"circle-check"],
+                ["Denied contact requests",stats.totalDeniedRequests,"circle-x"]
               ].map(([label,value,icon])=>(
                 <div key={label} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16,padding:"1.25rem",boxShadow:"0 6px 18px rgba(0,44,118,0.05)"}}>
                   <div style={{width:40,height:40,borderRadius:12,background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:14}}><Icon name={icon} size={20} style={{color:BRAND}}/></div>
@@ -2137,6 +2216,7 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
   const [reqForm,setReqForm]=useState({company:company?.name||"",contactName:"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});
   const [reqErrors,setReqErrors]=useState({});
   const [reqSent,setReqSent]=useState(false);
+  const [isSendingRequest,setIsSendingRequest]=useState(false);
   const rfset=(k,v)=>setReqForm(f=>({...f,[k]:v}));
 
   useEffect(()=>{ld(SK.CANDIDATES,true).then(d=>setCandidates((d||[]).filter(c=>c.consentPool&&c.shareActive)));},[]);
@@ -2155,6 +2235,7 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
   };
 
   const sendRequest=async()=>{
+    if(isSendingRequest)return;
     const e={};
     if(!reqForm.company.trim())e.company="Required";
     if(!reqForm.contactName.trim())e.contactName="Required";
@@ -2162,17 +2243,27 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
     if(!reqForm.title.trim())e.title="Required";
     if(!reqForm.jd.trim())e.jd="Required";
     if(Object.keys(e).length){setReqErrors(e);return;}
-    const req={id:gid(),candidateCode:selected.code,employerEmail:session?.email||null,companyCode:session?.code||null,...reqForm,createdAt:new Date().toISOString(),status:"pending"};
-    await saveOne(SK.REQUESTS,req,"id");
-    await saveOne(SK.NOTIFS,{id:gid(),type:"contact_request",to:selected.code,company:reqForm.company,title:reqForm.title,message:`${reqForm.company} has sent you a contact request for the role of ${reqForm.title}`,detail:req,createdAt:new Date().toISOString(),read:false},"id");
-    if(selected.email){
-      sendAutomationEmail(
-        selected.email,
-        `${reqForm.company} wants to connect with you about ${reqForm.title}`,
-        `Hi ${selected.name||"there"},\n\n${reqForm.company} found your profile in the pairup Talent Pool and would like to connect with you about the ${reqForm.title} role.\n\n${reqForm.jd}\n\n${reqForm.salary?`Salary range: ${reqForm.salary}\n`:""}${reqForm.benefits?`Benefits: ${reqForm.benefits}\n`:""}\nContact: ${reqForm.contactName} (${reqForm.contactEmail}${reqForm.contactPhone?`, ${reqForm.contactPhone}`:""})\n\nLog in to pairup to review and respond to this request.\n\nBest regards,\n${reqForm.company}`
-      );
+
+    setIsSendingRequest(true);
+    setReqErrors({});
+    const createdAt=new Date().toISOString();
+    const request={id:gid(),candidateCode:selected.code,employerEmail:session?.email||null,companyCode:session?.code||null,...reqForm,createdAt,status:"pending"};
+    const notification={id:gid(),type:"contact_request",to:selected.code,company:reqForm.company,title:reqForm.title,message:`${reqForm.company} has sent you a contact request for the role of ${reqForm.title}`,detail:request,createdAt,read:false};
+    const email=selected.email?{to:selected.email,subject:`${reqForm.company} wants to connect with you about ${reqForm.title}`,body:`Hi ${selected.name||"there"},\n\n${reqForm.company} found your profile in the pairup Talent Pool and would like to connect with you about the ${reqForm.title} role.\n\n${reqForm.jd}\n\n${reqForm.salary?`Salary range: ${reqForm.salary}\n`:""}${reqForm.benefits?`Benefits: ${reqForm.benefits}\n`:""}\nContact: ${reqForm.contactName} (${reqForm.contactEmail}${reqForm.contactPhone?`, ${reqForm.contactPhone}`:""})\n\nLog in to pairup to review and respond to this request.\n\nBest regards,\n${reqForm.company}`} : null;
+    try{
+      const result=await submitContactRequest(request,notification,email);
+      if(!result.success){
+        setReqErrors({submit:"Could not send the request. Please check your connection and try again."});
+        return;
+      }
+      setReqSent(true);
+      onRequest();
+    }catch(error){
+      console.error("Contact request submission failed",error);
+      setReqErrors({submit:"Could not send the request. Please check your connection and try again."});
+    }finally{
+      setIsSendingRequest(false);
     }
-    setReqSent(true);onRequest();
   };
 
   // Filter bar helper - now handled by FilterPills component
@@ -2300,7 +2391,8 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
                   <F label="Offered salary"><input style={inp} value={reqForm.salary} onChange={e=>rfset("salary",e.target.value)} placeholder="e.g. 30–40M VND/month"/></F>
                   <F label="Additional benefits"><input style={inp} value={reqForm.benefits} onChange={e=>rfset("benefits",e.target.value)} placeholder="e.g. insurance, remote, equity"/></F>
                 </div>
-                <Btn onClick={sendRequest} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"13px",marginTop:4}}>Send Request →</Btn>
+                {reqErrors.submit&&<p style={{fontSize:12,color:"#E24B4A",margin:"0 0 10px"}}>{reqErrors.submit}</p>}
+                <Btn onClick={sendRequest} disabled={isSendingRequest} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"13px",marginTop:4,opacity:isSendingRequest?0.65:1,cursor:isSendingRequest?"not-allowed":"pointer"}}>{isSendingRequest?"Sending…":"Send Request →"}</Btn>
               </>
             )}
           </div>
@@ -2474,6 +2566,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   const [errors,setErrors]=useState({});
   const [submitted,setSubmitted]=useState(false);
   const [alreadyApplied,setAlreadyApplied]=useState(false);
+  const [isApplying,setIsApplying]=useState(false);
   const [appliedCodes,setAppliedCodes]=useState(()=>new Set(initialApplications.filter(a=>a.candidateCode===session.code||(a.email&&a.email.toLowerCase()===session.email.toLowerCase())).map(a=>a.jobCode)));
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
 
@@ -2517,7 +2610,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   };
 
   const apply=async()=>{
-    if(alreadyApplied)return;
+    if(alreadyApplied||isApplying)return;
     const e={};
     if(!form.name.trim())e.name="Required";
     if(!form.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/))e.email="Invalid email";
@@ -2527,14 +2620,28 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
     if(!form.onboard)e.onboard="Required";
     if(!form.consent)e.consent="You must agree before applying";
     if(Object.keys(e).length){setErrors(e);return;}
+
+    setIsApplying(true);
+    setErrors({});
     const profile=await ld("pairup_my_profile_"+session.email);
-    const existing=(await ld(SK.APPLICATIONS,true))||[]; // read-only duplicate check; the write below is a safe single-row upsert regardless
-    const duplicate=existing.find(a=>a.jobCode===selected.code && (a.candidateCode===session.code||(a.email===form.email)));
-    if(duplicate){setAlreadyApplied(true);setAppliedCodes(prev=>new Set([...prev,selected.code]));return;}
-    const application={id:gid(),jobCode:selected.code,jobTitle:selected.title,company:selected.company,companyEmail:selected.companyEmail||null,candidateCode:session.code,profileSnapshot:profile||null,...form,createdAt:new Date().toISOString(),status:"applied",profileEvents:[]};
-    await saveOne(SK.APPLICATIONS,application,"id");
-    await saveOne(SK.NOTIFS,{id:gid(),type:"application",to:selected.companyEmail||"employer",message:`New application for ${selected.title} at ${selected.company}`,title:selected.title,company:selected.company,applicationId:application.id,candidateCode:application.candidateCode,createdAt:new Date().toISOString(),read:false},"id");
-    setAlreadyApplied(true);setAppliedCodes(prev=>new Set([...prev,selected.code]));setSubmitted(true);onApply();
+    const createdAt=new Date().toISOString();
+    const application={id:gid(),jobCode:selected.code,jobTitle:selected.title,company:selected.company,companyEmail:selected.companyEmail||null,candidateCode:session.code,profileSnapshot:profile||null,...form,createdAt,status:"applied",profileEvents:[]};
+    const notification={id:gid(),type:"application",to:selected.companyEmail||"employer",message:`New application for ${selected.title} at ${selected.company}`,title:selected.title,company:selected.company,applicationId:application.id,candidateCode:application.candidateCode,createdAt,read:false};
+    try{
+      const result=await submitApplication(application,notification,appliedCodes.has(selected.code));
+      if(!result.success){
+        setErrors({submit:"Could not submit your application. Please check your connection and try again."});
+        return;
+      }
+      setAlreadyApplied(true);
+      setAppliedCodes(prev=>new Set([...prev,selected.code]));
+      if(!result.duplicate){setSubmitted(true);onApply();}
+    }catch(error){
+      console.error("Application submission failed",error);
+      setErrors({submit:"Could not submit your application. Please check your connection and try again."});
+    }finally{
+      setIsApplying(false);
+    }
   };
 
   return(
@@ -2589,7 +2696,8 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
               ):alreadyApplied||submitted?<div style={{textAlign:"center",background:BRAND_LIGHT,borderRadius:14,padding:"2rem"}}><Icon name="check-circle" size={36} style={{color:BRAND}}/><h3 style={{color:BRAND,margin:"8px 0"}}>{submitted?"Application submitted!":"Applied"}</h3><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{submitted?`You've successfully applied for ${selected.title}. You can track its status under "Applied Jobs".`:"You have already applied for this position."}</p></div>:(<>
                 <Card><SH icon="user-circle" title="Apply for this position"/><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}><F label="Full name" error={errors.name} required><input style={inp} value={form.name} onChange={e=>sf("name",e.target.value)}/></F><F label="Email" error={errors.email} required><input style={inp} type="email" value={form.email} onChange={e=>sf("email",e.target.value)}/></F><F label="Phone number" error={errors.phone} required><input style={inp} value={form.phone} onChange={e=>sf("phone",e.target.value)}/></F><F label="CV link" error={errors.cvLink} required><input style={inp} type="url" value={form.cvLink} onChange={e=>sf("cvLink",e.target.value)} placeholder="https://..."/></F><F label="Portfolio link"><input style={inp} type="url" value={form.portfolio} onChange={e=>sf("portfolio",e.target.value)} placeholder="https://..."/></F><F label="Salary expected" error={errors.salary} required><input style={inp} value={form.salary} onChange={e=>sf("salary",e.target.value)} placeholder="e.g. 35M VND/month"/></F><F label="Available to start" error={errors.onboard} required><select style={inp} value={form.onboard} onChange={e=>sf("onboard",e.target.value)}><option value="">-- Select --</option>{ONBOARD_OPTS.map(o=><option key={o}>{o}</option>)}</select></F></div></Card>
                 <label style={{display:"flex",alignItems:"flex-start",gap:10,padding:"1rem",background:"#F8F9FB",borderRadius:10,border:`1px solid ${form.consent?BRAND:"var(--color-border-tertiary)"}`,cursor:"pointer",marginBottom:"1rem"}}><input type="checkbox" checked={form.consent} onChange={e=>sf("consent",e.target.checked)} style={{marginTop:3,accentColor:BRAND,width:16,height:16,flexShrink:0}}/><span style={{fontSize:12,color:"var(--color-text-primary)",lineHeight:1.6}}>I agree that my personal information and application details may be stored and processed for this job application. This consent is required to apply.</span></label>{errors.consent&&<p style={{fontSize:11,color:"#E24B4A",margin:"-6px 0 10px"}}>{errors.consent}</p>}
-                <Btn onClick={apply} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"13px"}}>Apply →</Btn>
+                {errors.submit&&<p style={{fontSize:12,color:"#E24B4A",margin:"0 0 10px"}}>{errors.submit}</p>}
+                <Btn onClick={apply} disabled={isApplying} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"13px",opacity:isApplying?0.65:1,cursor:isApplying?"not-allowed":"pointer"}}>{isApplying?"Applying…":"Apply →"}</Btn>
               </>)}
             </div>
             <div>
