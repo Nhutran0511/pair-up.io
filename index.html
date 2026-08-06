@@ -243,9 +243,9 @@ async function sheetDeleteRow(sheetName,keyField,keyValue){
 // down to a single request instead of four. Individual sheetList() calls for the
 // same sheets (from elsewhere on the page) transparently share this same result via
 // the existing _sheetCache.
-async function sheetListMulti(sheetNames){
+async function sheetListMulti(sheetNames,forceFresh=false){
   const now=Date.now();
-  const needed=sheetNames.filter(name=>{
+  const needed=forceFresh?sheetNames.slice():sheetNames.filter(name=>{
     const cached=_sheetCache[name];
     return !(cached&&(now-cached.ts)<SHEET_CACHE_TTL_MS);
   });
@@ -1498,12 +1498,14 @@ function AdminPage(){
     startGlobalLoadingOperation();
     try{
       if(destination==="candidates"){
-        const freshCandidates=await ld(SK.CANDIDATES,true,true);
+        await sheetListMulti(["Job Seekers"],true);
+        const freshCandidates=await ld(SK.CANDIDATES,true);
         setCandidates(freshCandidates||[]);
       }else if(destination==="jobs"){
+        await sheetListMulti(["Jobs","Companies"],true);
         const [freshJobs,freshCompanies]=await Promise.all([
-          ld(SK.JOBS,true,true),
-          ld(SK.COMPANIES,true,true)
+          ld(SK.JOBS,true),
+          ld(SK.COMPANIES,true)
         ]);
         setJobs(freshJobs||[]);
         setCompanies(freshCompanies||[]);
@@ -2614,14 +2616,21 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
     setCompanies(co||[]);
   };
   useEffect(()=>{
-    load();
-    if(session.role==="jobseeker"){
-      (async()=>{
-        const profile=await ld("pairup_my_profile_"+session.email);
-        const {apps}=await ldMany({apps:SK.APPLICATIONS});
+    (async()=>{
+      if(session.role==="jobseeker"){
+        // One batched round-trip for Jobs+Companies+Applied instead of two
+        // separate sequential fetches — cuts time-to-interactive on this tab.
+        const [{d,co,apps},profile]=await Promise.all([
+          ldMany({d:SK.JOBS,co:SK.COMPANIES,apps:SK.APPLICATIONS}),
+          ld("pairup_my_profile_"+session.email)
+        ]);
+        setJobs((d||[]).filter(j=>j.status==="active"));
+        setCompanies(co||[]);
         setAppliedCodes(new Set((apps||[]).filter(a=>a.candidateCode===session.code||(profile?.email&&a.email===profile.email)).map(a=>a.jobCode)));
-      })();
-    }
+      }else{
+        await load();
+      }
+    })();
     const iv=setInterval(load,10000); // keep the list fresh as employers post/reactivate jobs
     return ()=>clearInterval(iv);
   },[]);
@@ -2636,10 +2645,13 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   const openJob=async(j)=>{
     setSelected(j);setSubmitted(false);setErrors({});
     if(session.role!=="jobseeker")return;
+    // "Already applied?" is answered from the appliedCodes state (kept in
+    // sync on mount and right after a successful apply) instead of fetching
+    // the entire, ever-growing Applied table over the network on every single
+    // job click — that round-trip was what made opening the apply form feel
+    // slow.
     const profile=await ld("pairup_my_profile_"+session.email);
-    const applications=(await ld(SK.APPLICATIONS,true))||[];
-    const existing=applications.find(a=>a.jobCode===j.code && (a.candidateCode===session.code||(profile?.email&&a.email===profile.email)));
-    setAlreadyApplied(!!existing);
+    setAlreadyApplied(appliedCodes.has(j.code));
     setForm({
       name:profile?.name||"",email:profile?.email||session.email,phone:profile?.phone||"",
       cvLink:profile?.cvLink||"",portfolio:profile?.portfolio||"",salary:profile?.salary||"",
@@ -3267,29 +3279,27 @@ function App(){
     try{
       let nextData=null;
 
+      // Batched into ONE round-trip via list_multi (forceFresh=true still
+      // bypasses the client cache to get up-to-date data on tab switch, but
+      // no longer fires N separate HTTP requests to do it — that fan-out of
+      // parallel-but-separate requests, not the network itself, was the main
+      // cause of the multi-second wait when switching tabs).
       if(destination==="public"){
-        const candidates=await ld(SK.CANDIDATES,true,true);
+        await sheetListMulti(["Job Seekers"],true);
+        const candidates=await ld(SK.CANDIDATES,true);
         nextData={destination,candidates:candidates||[]};
       }else if(destination==="jobs"){
+        await sheetListMulti(["Jobs","Applied","Companies"],true);
         const [jobs,applications,companies]=await Promise.all([
-          ld(SK.JOBS,true,true),
-          ld(SK.APPLICATIONS,true,true),
-          ld(SK.COMPANIES,true,true)
+          ld(SK.JOBS,true),
+          ld(SK.APPLICATIONS,true),
+          ld(SK.COMPANIES,true)
         ]);
         nextData={destination,jobs:jobs||[],applications:applications||[],companies:companies||[]};
       }else if(destination==="candidate"&&role==="jobseeker"){
-        await Promise.all([
-          ld(SK.CANDIDATES,true,true),
-          ld(SK.REQUESTS,true,true),
-          ld(SK.APPLICATIONS,true,true)
-        ]);
+        await sheetListMulti(["Job Seekers","Requests","Applied"],true);
       }else if(destination==="employer"&&role==="employer"){
-        await Promise.all([
-          ld(SK.JOBS,true,true),
-          ld(SK.REQUESTS,true,true),
-          ld(SK.APPLICATIONS,true,true),
-          ld(SK.CANDIDATES,true,true)
-        ]);
+        await sheetListMulti(["Jobs","Requests","Applied","Job Seekers"],true);
       }
 
       if(navigationId!==menuNavigationId.current)return;
