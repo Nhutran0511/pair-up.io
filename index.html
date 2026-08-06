@@ -1602,22 +1602,35 @@ function AdminPage(){
         <>
         {tab==="dashboard"&&(
           stats?(
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16}}>
+            <div style={{display:"flex",flexDirection:"column",gap:28}}>
               {[
-                ["Total website visits",stats.totalVisits,"world"],
-                ["Registered job seekers",stats.totalJobSeekers,"user-search"],
-                ["Registered employers",stats.totalEmployers,"building"],
-                ["Total applications",stats.totalApplications,"file-text"],
-                ["Successful applicants",stats.totalPassed,"circle-check"],
-                ["Total active jobs",stats.totalActiveJobs,"briefcase"],
-                ["Contact requests sent",stats.totalContactRequests,"send"],
-                ["Accepted contact requests",stats.totalAcceptedRequests,"circle-check"],
-                ["Denied contact requests",stats.totalDeniedRequests,"circle-x"]
-              ].map(([label,value,icon])=>(
-                <div key={label} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16,padding:"1.25rem",boxShadow:"0 6px 18px rgba(0,44,118,0.05)"}}>
-                  <div style={{width:40,height:40,borderRadius:12,background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:14}}><Icon name={icon} size={20} style={{color:BRAND}}/></div>
-                  <p style={{fontSize:28,fontWeight:800,color:BRAND,margin:"0 0 5px"}}>{Number(value||0).toLocaleString()}</p>
-                  <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0,fontWeight:600}}>{label}</p>
+                ["Overview",[
+                  ["Total website visits",stats.totalVisits,"world"],
+                  ["Total job seekers",stats.totalJobSeekers,"user-search"],
+                  ["Total companies",stats.totalEmployers,"building"]
+                ]],
+                ["Job",[
+                  ["Total active jobs",stats.totalActiveJobs,"briefcase"],
+                  ["Total candidates",stats.totalApplications,"users"],
+                  ["Successful candidates",`${Number(stats.totalPassed||0).toLocaleString()}${stats.totalApplications?` (${Math.round((stats.totalPassed||0)/stats.totalApplications*100)}%)`:""}`,"circle-check"]
+                ]],
+                ["Contact request",[
+                  ["Total sent requests",stats.totalContactRequests,"send"],
+                  ["Total accepted",stats.totalAcceptedRequests,"circle-check"],
+                  ["Total denied",stats.totalDeniedRequests,"circle-x"]
+                ]]
+              ].map(([section,items])=>(
+                <div key={section}>
+                  <h2 style={{fontSize:13,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"0 0 10px"}}>{section}</h2>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16}}>
+                    {items.map(([label,value,icon])=>(
+                      <div key={label} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16,padding:"1.25rem",boxShadow:"0 6px 18px rgba(0,44,118,0.05)"}}>
+                        <div style={{width:40,height:40,borderRadius:12,background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:14}}><Icon name={icon} size={20} style={{color:BRAND}}/></div>
+                        <p style={{fontSize:28,fontWeight:800,color:BRAND,margin:"0 0 5px"}}>{typeof value==="string"?value:Number(value||0).toLocaleString()}</p>
+                        <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0,fontWeight:600}}>{label}</p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ))}
             </div>
@@ -2287,6 +2300,7 @@ Response timestamp: ${respondedAt}`
 function PublicPage({onRequest,session,company,initialCandidates=[]}){
   const [candidates,setCandidates]=useState(()=>initialCandidates.filter(c=>c.consentPool&&c.shareActive));
   const [filter,setFilter]=useState({location:"",industry:"",years:"",field:"",activelyExploring:""});
+  const [search,setSearch]=useState("");
   const [selected,setSelected]=useState(null);
   const [showContactForm,setShowContactForm]=useState(false);
   const [reqForm,setReqForm]=useState({company:company?.name||"",contactName:company?.contactPerson||"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});
@@ -2297,12 +2311,14 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
 
   useEffect(()=>{ld(SK.CANDIDATES,true).then(d=>setCandidates((d||[]).filter(c=>c.consentPool&&c.shareActive)));},[]);
 
+  const q=search.trim().toLowerCase();
   const filtered=candidates.filter(c=>
     (!filter.location||c.locations?.includes(filter.location))&&
     (!filter.industry||(c.industries||[]).includes(filter.industry))&&
     (!filter.years||c.years===filter.years)&&
     (!filter.field||c.field===filter.field)&&
-    (!filter.activelyExploring||c.activelyExploring===filter.activelyExploring)
+    (!filter.activelyExploring||c.activelyExploring===filter.activelyExploring)&&
+    (!q||[c.code,c.position,c.field,c.skills,(c.industries||[]).join(" "),(c.locations||[]).join(" "),stripHtml(c.intro)].filter(Boolean).join(" ").toLowerCase().includes(q))
   );
 
   const openCandidate=(c)=>{
@@ -2350,6 +2366,12 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
     <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
       <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Talent Pool</h1>
       <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>Browse candidates who are open to new opportunities</p>
+
+      {/* Search */}
+      <div style={{position:"relative",marginBottom:"1rem"}}>
+        <Icon name="search" size={16} style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",color:"var(--color-text-secondary)"}}/>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search by position, skill, field, industry, location..." style={{...inp,padding:"10px 14px 10px 38px"}}/>
+      </div>
 
       {/* Filters */}
       <Card style={{marginBottom:"1.5rem"}}>
@@ -2644,6 +2666,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   const [jobs,setJobs]=useState(()=>initialJobs.filter(j=>j.status==="active"));
   const [companies,setCompanies]=useState(initialCompanies);
   const [filter,setFilter]=useState({location:"",industry:"",years:"",field:""});
+  const [search,setSearch]=useState("");
   const [selected,setSelected]=useState(null);
   const [form,setForm]=useState({name:"",email:"",phone:"",cvLink:"",portfolio:"",salary:"",onboard:"",consent:false});
   const [errors,setErrors]=useState({});
@@ -2678,12 +2701,14 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
     return ()=>clearInterval(iv);
   },[]);
 
-  const filtered=jobs.filter(j=>
-    (!filter.location||(j.locations||[]).includes(filter.location))&&
+  const filtered=jobs.filter(j=>{
+    const q=search.trim().toLowerCase();
+    return (!filter.location||(j.locations||[]).includes(filter.location))&&
     (!filter.industry||(j.industries||[]).includes(filter.industry))&&
     (!filter.years||j.years===filter.years)&&
-    (!filter.field||j.field===filter.field)
-  );
+    (!filter.field||j.field===filter.field)&&
+    (!q||[j.code,j.title,j.company,j.field,(j.industries||[]).join(" "),(j.locations||[]).join(" "),j.summary,j.requirements].filter(Boolean).join(" ").toLowerCase().includes(q));
+  });
 
   const openJob=async(j)=>{
     setSelected(j);setSubmitted(false);setErrors({});
@@ -2741,6 +2766,10 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
     <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
       <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Jobs</h1>
       <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>Browse all active jobs posted on pairup.</p>
+      <div style={{position:"relative",marginBottom:"1rem"}}>
+        <Icon name="search" size={16} style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",color:"var(--color-text-secondary)"}}/>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search by job title, company, field, industry, location..." style={{...inp,padding:"10px 14px 10px 38px"}}/>
+      </div>
       <Card style={{marginBottom:"1.5rem"}}>
         <SH icon="filter" title="Filters"/>
         <FilterPills title="Location" options={LOCATIONS} value={filter.location} onChange={v=>setFilter(f=>({...f,location:v}))} inline={4}/>
