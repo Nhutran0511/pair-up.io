@@ -739,6 +739,20 @@ const PillSel=({options,selected,onToggle,error})=>(
   </div>
 );
 
+// Single-select location picker with an "Others" pill that reveals a free-text
+// input — used on the employer's company profile, where a company has one
+// registered HQ location (unlike job postings, which can target several).
+const LOCATION_PICK_OPTS=[...LOCATIONS,"Others"];
+const SingleLocationPicker=({value,customValue,onSelect,onCustomChange,error})=>(
+  <div>
+    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+      {LOCATION_PICK_OPTS.map(o=><button key={o} type="button" onClick={()=>onSelect(o)} style={{padding:"5px 14px",borderRadius:99,border:value===o?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:value===o?BRAND_LIGHT:"none",color:value===o?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:12,fontWeight:value===o?700:400,fontFamily:FONT,transition:"all 0.12s"}}>{o}</button>)}
+    </div>
+    {value==="Others"&&<input style={{...inp,marginTop:8}} value={customValue} onChange={e=>onCustomChange(e.target.value)} placeholder="Enter your location"/>}
+    {error&&<p style={{fontSize:11,color:"#E24B4A",margin:"4px 0 0"}}>{error}</p>}
+  </div>
+);
+
 // ── INDUSTRY PICKER with overflow → "Others" popup ───────────────────────────
 const INDUSTRY_INLINE=4; // show these inline; rest accessible via "Others" button
 
@@ -1270,8 +1284,15 @@ function AuthPage({role,onAuthed,onBack}){
 
 // ── EMPLOYER COMPANY PROFILE (required once per employer account) ────────────
 function CompanyProfilePage({session,onSaved,existing}){
-  const blank={name:"",industry:"",taxCode:"",address:"",intro:"",website:"",teamSize:""};
-  const [form,setForm]=useState(existing?{name:existing.name||"",industry:existing.industry||"",taxCode:existing.taxCode||"",address:existing.address||"",intro:existing.intro||"",website:existing.website||"",teamSize:existing.teamSize||""}:blank);
+  const blank={name:"",industry:"",taxCode:"",address:"",intro:"",website:"",teamSize:"",contactPerson:"",location:"",customLocation:""};
+  const existingLocationIsCustom=!!existing?.location&&!LOCATIONS.includes(existing.location);
+  const [form,setForm]=useState(existing?{
+    name:existing.name||"",industry:existing.industry||"",taxCode:existing.taxCode||"",address:existing.address||"",
+    intro:existing.intro||"",website:existing.website||"",teamSize:existing.teamSize||"",
+    contactPerson:existing.contactPerson||"",
+    location:existingLocationIsCustom?"Others":(existing.location||""),
+    customLocation:existingLocationIsCustom?existing.location:""
+  }:blank);
   const [errors,setErrors]=useState({});
   const s=(k,v)=>setForm(f=>({...f,[k]:v}));
 
@@ -1280,6 +1301,9 @@ function CompanyProfilePage({session,onSaved,existing}){
     if(!form.name.trim())e.name="Required";
     if(!form.industry)e.industry="Required";
     if(!form.taxCode.trim())e.taxCode="Required";
+    if(!form.contactPerson.trim())e.contactPerson="Required";
+    if(!form.location)e.location="Select a location";
+    else if(form.location==="Others"&&!form.customLocation.trim())e.location="Please enter your location";
     if(!form.address.trim())e.address="Required";
     if(!form.intro.trim())e.intro="Required";
     if(!form.website.trim())e.website="Required";
@@ -1289,7 +1313,12 @@ function CompanyProfilePage({session,onSaved,existing}){
 
   const submit=async()=>{
     const e=validate();if(Object.keys(e).length){setErrors(e);return;}
-    const company={...form,code:session.code,email:session.email,createdAt:new Date().toISOString()};
+    const finalLocation=form.location==="Others"?form.customLocation.trim():form.location;
+    const company={
+      name:form.name,industry:form.industry,taxCode:form.taxCode,address:form.address,intro:form.intro,
+      website:form.website,teamSize:form.teamSize,contactPerson:form.contactPerson,location:finalLocation,
+      code:session.code,email:session.email,createdAt:new Date().toISOString()
+    };
     await saveOne(SK.COMPANIES,company,"code");
     onSaved(company);
   };
@@ -1303,7 +1332,13 @@ function CompanyProfilePage({session,onSaved,existing}){
       <Card>
         <SH icon="building" title="Company Information"/>
         <F label="Company name" error={errors.name} required><input style={inp} value={form.name} onChange={e=>s("name",e.target.value)}/></F>
-        <F label="Industry" error={errors.industry} required><select style={inp} value={form.industry} onChange={e=>s("industry",e.target.value)}><option value="">-- Select --</option>{INDUSTRIES.map(i=><option key={i}>{i}</option>)}</select></F>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
+          <F label="Industry" error={errors.industry} required><select style={inp} value={form.industry} onChange={e=>s("industry",e.target.value)}><option value="">-- Select --</option>{INDUSTRIES.map(i=><option key={i}>{i}</option>)}</select></F>
+          <F label="Contact person" error={errors.contactPerson} required hint="Used to prefill your job posts and contact requests"><input style={inp} value={form.contactPerson} onChange={e=>s("contactPerson",e.target.value)} placeholder="e.g. Jane Doe, HR Manager"/></F>
+        </div>
+        <F label="Location" error={errors.location} required>
+          <SingleLocationPicker value={form.location} customValue={form.customLocation} onSelect={v=>s("location",v)} onCustomChange={v=>s("customLocation",v)}/>
+        </F>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
           <F label="Tax code" error={errors.taxCode} required><input style={inp} value={form.taxCode} onChange={e=>s("taxCode",e.target.value)}/></F>
           <F label="Company website" error={errors.website} required><input style={inp} value={form.website} onChange={e=>s("website",e.target.value)} placeholder="https://…"/></F>
@@ -1760,6 +1795,7 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
     if(!form.name.trim())e.name="Required";
     if(!form.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/))e.email="Invalid email";
     if(!form.phone.trim())e.phone="Required";
+    if(!form.cvLink.trim())e.cvLink="Required";
     if(!form.position.trim())e.position="Required";
     if(!form.field)e.field="Required";
     if(form.locations.length===0)e.locations="Select at least one";
@@ -1907,7 +1943,7 @@ Response timestamp: ${respondedAt}`
       {/* CV Link */}
       <Card>
         <SH icon="link" title="CV / Resume"/>
-        <F label="CV link" hint="Paste a shareable link to your CV (Google Drive, Dropbox, OneDrive, Notion, or another public link).">
+        <F label="CV link" error={errors.cvLink} required hint="Paste a shareable link to your CV (Google Drive, Dropbox, OneDrive, Notion, or another public link).">
           <input style={inp} type="url" value={form.cvLink} onChange={e=>sf("cvLink",e.target.value)} placeholder="https://drive.google.com/..."/>
         </F>
         <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"-0.5rem 0 0"}}>Your CV link is private and will only be shared with an employer after you accept their contact request.</p>
@@ -2253,7 +2289,7 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
   const [filter,setFilter]=useState({location:"",industry:"",years:"",field:"",activelyExploring:""});
   const [selected,setSelected]=useState(null);
   const [showContactForm,setShowContactForm]=useState(false);
-  const [reqForm,setReqForm]=useState({company:company?.name||"",contactName:"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});
+  const [reqForm,setReqForm]=useState({company:company?.name||"",contactName:company?.contactPerson||"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});
   const [reqErrors,setReqErrors]=useState({});
   const [reqSent,setReqSent]=useState(false);
   const [isSendingRequest,setIsSendingRequest]=useState(false);
@@ -2271,7 +2307,7 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
 
   const openCandidate=(c)=>{
     setSelected(c);setShowContactForm(false);
-    setReqSent(false);setReqForm({company:company?.name||"",contactName:"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});setReqErrors({});
+    setReqSent(false);setReqForm({company:company?.name||"",contactName:company?.contactPerson||"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});setReqErrors({});
   };
 
   const sendRequest=async()=>{
@@ -2450,7 +2486,14 @@ const ROUND_REASONS=["Over qualified","Under qualified","Lack of experience","Sa
 const DEFAULT_RECRUITMENT_PROCESS=RECRUITMENT_ROUNDS.map((name)=>({name,enabled:true,description:STAGE_DESCRIPTIONS[name]||""}));
 
 function PostJobPage({onBack,onSuccess,company,session}){
-  const [form,setForm]=useState({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:[],industries:[],field:"",contact:"",deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))});
+  // Prefill from the employer's company profile so they don't have to
+  // re-type what's already on file — still editable per job (e.g. a role
+  // based in a different office than HQ, or a different point of contact).
+  const defaultContact=company?.contactPerson?`${company.contactPerson} — ${session?.email||""}`:(session?.email||"");
+  const defaultLocations=company?.location?[company.location]:[];
+  const jobLocationOptions=company?.location&&!LOCATIONS.includes(company.location)?[...LOCATIONS,company.location]:LOCATIONS;
+  const blankForm=()=>({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:defaultLocations,industries:[],field:"",contact:defaultContact,deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))});
+  const [form,setForm]=useState(blankForm);
   const [errors,setErrors]=useState({});
   const [done,setDone]=useState(null);
   const [benefitsSaved,setBenefitsSaved]=useState(false);
@@ -2525,7 +2568,7 @@ function PostJobPage({onBack,onSuccess,company,session}){
         <p style={{fontFamily:"monospace",fontSize:36,fontWeight:800,color:BRAND,margin:0,letterSpacing:4}}>{done}</p>
       </div>
       <div style={{display:"flex",gap:10,justifyContent:"center"}}>
-        <Btn variant="outline" onClick={()=>{setDone(null);setForm({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:[],industries:[],field:"",contact:"",deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))});setErrors({});}}>Post another job</Btn>
+        <Btn variant="outline" onClick={()=>{setDone(null);setForm(blankForm());setErrors({});}}>Post another job</Btn>
         <Btn onClick={onBack}>Back to dashboard</Btn>
       </div>
     </div>
@@ -2550,7 +2593,7 @@ function PostJobPage({onBack,onSuccess,company,session}){
           <F label="Application deadline"><input style={inp} type="date" value={form.deadline} onChange={e=>s("deadline",e.target.value)}/></F>
         </div>
         <F label="Location(s)" error={errors.locations} required>
-          <PillSel options={LOCATIONS} selected={form.locations} onToggle={tl} error={errors.locations}/>
+          <PillSel options={jobLocationOptions} selected={form.locations} onToggle={tl} error={errors.locations}/>
         </F>
         <F label="Industry (select all that apply)" error={errors.industries} required>
           <IndustryPicker selected={form.industries} onToggle={ti} error={errors.industries}/>
@@ -2711,7 +2754,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
       </Card>
       <div style={{display:"flex",flexDirection:"column",gap:10}}>
         {filtered.map(j=>(
-          <button key={j.code} onClick={()=>openJob(j)} style={{textAlign:"left",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:14,padding:"1.25rem",cursor:"pointer",fontFamily:FONT}}>
+          <div key={j.code} onClick={()=>openJob(j)} role="button" tabIndex={0} onKeyDown={e=>{if(e.key==="Enter")openJob(j);}} style={{textAlign:"left",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:14,padding:"1.25rem",cursor:"pointer",fontFamily:FONT}}>
             <div style={{display:"flex",justifyContent:"space-between",gap:16,alignItems:"flex-start"}}>
               <div style={{flex:1}}>
                 <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:5}}><Badge color="blue">{j.field||"Job"}</Badge><span style={{fontFamily:"monospace",fontSize:11,color:BRAND_DIM}}>{j.code}</span></div>
@@ -2719,12 +2762,13 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
                 <p style={{fontSize:13,fontWeight:600,margin:"0 0 8px"}}>{j.company}</p>
                 <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}>{(j.locations||[]).join(" · ")} · {(j.industries||[]).join(", ")}{j.salary?` · ${j.salary}`:""}</p>
               </div>
-              <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
                 {appliedCodes.has(j.code)&&<Badge color="green">Applied</Badge>}
-                <Icon name="chevron-right" size={18} style={{color:BRAND_DIM,marginTop:5}}/>
+                <button onClick={e=>{e.stopPropagation();openJob(j);}} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,fontSize:12,fontWeight:700,fontFamily:FONT,padding:"8px 14px",borderRadius:8,whiteSpace:"nowrap"}}>View JD</button>
+                <Icon name="chevron-right" size={18} style={{color:BRAND_DIM}}/>
               </div>
             </div>
-          </button>
+          </div>
         ))}
         {filtered.length===0&&<div style={{textAlign:"center",padding:"3rem",color:"var(--color-text-secondary)",background:"var(--color-background-primary)",borderRadius:16}}>No jobs match your filters.</div>}
       </div>
