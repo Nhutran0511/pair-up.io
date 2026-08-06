@@ -374,6 +374,44 @@ async function trackWebsiteVisit(){
   }catch(e){ console.error("Visit tracking failed",e); }
 }
 
+// Lightweight badge-count check: asks the backend to count unread rows
+// server-side (2 columns only) instead of downloading the entire, ever-growing
+// Notifications table client-side just to count a few. Falls back to the old
+// full-table read if an older Apps Script deployment doesn't recognize the
+// action yet, so this never breaks the badge on an un-redeployed backend.
+async function fetchNotifUnreadCount(matchValues){
+  const composite=await postCompositeAction("notif_unread_count",{matchValues});
+  if(composite.supported) return composite.success?(composite.count||0):null;
+  const all=await ld(SK.NOTIFS,true);
+  if(all===null) return null;
+  const matchSet=new Set(matchValues.map(v=>String(v||"").toLowerCase()));
+  return all.filter(x=>matchSet.has(String(x.to||"").toLowerCase())&&!x.read).length;
+}
+
+// Marks a set of notification ids as read with a single-column server write,
+// instead of rewriting the whole Notifications table (every user's rows) just
+// to flip a few flags. Patches the local cache the same way. Falls back to the
+// old full-table rewrite only if the backend doesn't support the fast path yet.
+async function markNotifsRead(ids,allNotifs){
+  if(!ids.length) return;
+  const composite=await postCompositeAction("mark_notifs_read",{ids});
+  if(composite.supported){
+    if(composite.success){
+      try{
+        const idSet=new Set(ids);
+        const patched=(allNotifs||[]).map(n=>idSet.has(n.id)?{...n,read:true}:n);
+        localStorage.setItem(SK.NOTIFS,JSON.stringify(patched));
+      }catch(e){}
+      const map=SHEET_MAP[SK.NOTIFS];
+      if(map)delete _sheetCache[map.sheet];
+    }
+    return;
+  }
+  const idSet=new Set(ids);
+  const updated=(allNotifs||[]).map(n=>idSet.has(n.id)?{...n,read:true}:n);
+  await sd(SK.NOTIFS,updated,true);
+}
+
 async function loadDashboardStats(){
   try{
     const url=await getSheetUrl();
@@ -3120,8 +3158,7 @@ function NotificationsPage({onRefresh,role,session,onBack}){
       setNotifs(scoped);
       const unread=scoped.filter(n=>!n.read);
       if(unread.length){
-        const updated=all.map(n=>scoped.some(s=>s.id===n.id)?{...n,read:true}:n);
-        await sd(SK.NOTIFS,updated,true);
+        await markNotifsRead(unread.map(n=>n.id),all);
         onRefresh();
       }
     })();
@@ -3209,17 +3246,12 @@ function App(){
 
   useEffect(()=>{
     const checkNotifs=async()=>{
-      const n=(await ld(SK.NOTIFS,true))||[];
-      const relevant=n.filter(x=>{
-        if(!session)return false;
-        return session.role==="jobseeker"
-          ?(x.to===session.code||x.to==="jobseeker"||x.to==="all")
-          :(x.to?.toLowerCase?.()===session.email?.toLowerCase()||x.to==="employer"||x.to==="all");
-      });
-      const unreadCount=relevant.filter(x=>!x.read).length;
-      console.log(`[pairup notif check] role=${session?.role} code=${session?.code} email=${session?.email} | total=${n.length} matched=${relevant.length} unread=${unreadCount}`);
-      console.log("[pairup notif check] all notif 'to' values:",n.map(x=>`to=${x.to} read=${x.read} type=${x.type}`).join(" | "));
-      setNotifCount(unreadCount);
+      if(!session)return;
+      const matchValues=session.role==="jobseeker"
+        ?[session.code,"jobseeker","all"]
+        :[session.email,"employer","all"];
+      const count=await fetchNotifUnreadCount(matchValues);
+      if(count!==null) setNotifCount(count);
     };
     checkNotifs();
     // Poll so new notifications created by someone else (a different browser/
