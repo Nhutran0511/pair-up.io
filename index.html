@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-07-notifs-timeline-fix";
+const APP_BUILD="2026-08-05-admin-metrics-pu-codes";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -412,20 +412,6 @@ async function markNotifsRead(ids,allNotifs){
   await sd(SK.NOTIFS,updated,true);
 }
 
-// Lightweight notifications list: asks the backend to filter by "to" server-
-// side (returning only this visitor's own rows) instead of downloading the
-// entire, ever-growing Notifications table and filtering client-side. Falls
-// back to the old full-table read if an older Apps Script deployment doesn't
-// recognize the action yet.
-async function fetchNotifList(matchValues){
-  const composite=await postCompositeAction("notif_list",{matchValues});
-  if(composite.supported) return composite.success?(composite.rows||[]):null;
-  const all=await ld(SK.NOTIFS,true);
-  if(all===null) return null;
-  const matchSet=new Set(matchValues.map(v=>String(v||"").toLowerCase()));
-  return all.filter(x=>matchSet.has(String(x.to||"").toLowerCase()));
-}
-
 async function loadDashboardStats(){
   try{
     const url=await getSheetUrl();
@@ -753,20 +739,6 @@ const PillSel=({options,selected,onToggle,error})=>(
   </div>
 );
 
-// Single-select location picker with an "Others" pill that reveals a free-text
-// input — used on the employer's company profile, where a company has one
-// registered HQ location (unlike job postings, which can target several).
-const LOCATION_PICK_OPTS=[...LOCATIONS,"Others"];
-const SingleLocationPicker=({value,customValue,onSelect,onCustomChange,error})=>(
-  <div>
-    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-      {LOCATION_PICK_OPTS.map(o=><button key={o} type="button" onClick={()=>onSelect(o)} style={{padding:"5px 14px",borderRadius:99,border:value===o?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:value===o?BRAND_LIGHT:"none",color:value===o?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:12,fontWeight:value===o?700:400,fontFamily:FONT,transition:"all 0.12s"}}>{o}</button>)}
-    </div>
-    {value==="Others"&&<input style={{...inp,marginTop:8}} value={customValue} onChange={e=>onCustomChange(e.target.value)} placeholder="Enter your location"/>}
-    {error&&<p style={{fontSize:11,color:"#E24B4A",margin:"4px 0 0"}}>{error}</p>}
-  </div>
-);
-
 // ── INDUSTRY PICKER with overflow → "Others" popup ───────────────────────────
 const INDUSTRY_INLINE=4; // show these inline; rest accessible via "Others" button
 
@@ -955,7 +927,7 @@ function Nav({page,onNavigate,notifCount,role,onLogout,onDeleteAccount,onOpenSyn
       {showSync&&<button onClick={onOpenSync} title="Google Sheets sync" aria-label="Sync settings" style={{marginLeft:"auto",width:40,height:40,border:"none",background:"none",color:"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10}}>
         <Icon name="cloud" size={19}/>
       </button>}
-      <button onClick={onOpenNotifs} data-loading-immediate="true" title="Notifications" aria-label="Notifications" style={{position:"relative",width:40,height:40,border:"none",background:"none",color:page==="notifications"?"#fff":"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10,marginLeft:showSync?0:"auto"}}>
+      <button onClick={onOpenNotifs} title="Notifications" aria-label="Notifications" style={{position:"relative",width:40,height:40,border:"none",background:"none",color:page==="notifications"?"#fff":"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10,marginLeft:showSync?0:"auto"}}>
         <Icon name="bell" size={20}/>
         {notifCount>0&&<span style={{position:"absolute",top:2,right:1,minWidth:16,height:16,padding:"0 4px",borderRadius:99,background:"#FF6B6B",color:"#fff",fontSize:10,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center"}}>{notifCount>99?"99+":notifCount}</span>}
       </button>
@@ -1298,15 +1270,8 @@ function AuthPage({role,onAuthed,onBack}){
 
 // ── EMPLOYER COMPANY PROFILE (required once per employer account) ────────────
 function CompanyProfilePage({session,onSaved,existing}){
-  const blank={name:"",industry:"",taxCode:"",address:"",intro:"",website:"",teamSize:"",contactPerson:"",location:"",customLocation:""};
-  const existingLocationIsCustom=!!existing?.location&&!LOCATIONS.includes(existing.location);
-  const [form,setForm]=useState(existing?{
-    name:existing.name||"",industry:existing.industry||"",taxCode:existing.taxCode||"",address:existing.address||"",
-    intro:existing.intro||"",website:existing.website||"",teamSize:existing.teamSize||"",
-    contactPerson:existing.contactPerson||"",
-    location:existingLocationIsCustom?"Others":(existing.location||""),
-    customLocation:existingLocationIsCustom?existing.location:""
-  }:blank);
+  const blank={name:"",industry:"",taxCode:"",address:"",intro:"",website:"",teamSize:""};
+  const [form,setForm]=useState(existing?{name:existing.name||"",industry:existing.industry||"",taxCode:existing.taxCode||"",address:existing.address||"",intro:existing.intro||"",website:existing.website||"",teamSize:existing.teamSize||""}:blank);
   const [errors,setErrors]=useState({});
   const s=(k,v)=>setForm(f=>({...f,[k]:v}));
 
@@ -1315,9 +1280,6 @@ function CompanyProfilePage({session,onSaved,existing}){
     if(!form.name.trim())e.name="Required";
     if(!form.industry)e.industry="Required";
     if(!form.taxCode.trim())e.taxCode="Required";
-    if(!form.contactPerson.trim())e.contactPerson="Required";
-    if(!form.location)e.location="Select a location";
-    else if(form.location==="Others"&&!form.customLocation.trim())e.location="Please enter your location";
     if(!form.address.trim())e.address="Required";
     if(!form.intro.trim())e.intro="Required";
     if(!form.website.trim())e.website="Required";
@@ -1327,12 +1289,7 @@ function CompanyProfilePage({session,onSaved,existing}){
 
   const submit=async()=>{
     const e=validate();if(Object.keys(e).length){setErrors(e);return;}
-    const finalLocation=form.location==="Others"?form.customLocation.trim():form.location;
-    const company={
-      name:form.name,industry:form.industry,taxCode:form.taxCode,address:form.address,intro:form.intro,
-      website:form.website,teamSize:form.teamSize,contactPerson:form.contactPerson,location:finalLocation,
-      code:session.code,email:session.email,createdAt:new Date().toISOString()
-    };
+    const company={...form,code:session.code,email:session.email,createdAt:new Date().toISOString()};
     await saveOne(SK.COMPANIES,company,"code");
     onSaved(company);
   };
@@ -1346,13 +1303,7 @@ function CompanyProfilePage({session,onSaved,existing}){
       <Card>
         <SH icon="building" title="Company Information"/>
         <F label="Company name" error={errors.name} required><input style={inp} value={form.name} onChange={e=>s("name",e.target.value)}/></F>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
-          <F label="Industry" error={errors.industry} required><select style={inp} value={form.industry} onChange={e=>s("industry",e.target.value)}><option value="">-- Select --</option>{INDUSTRIES.map(i=><option key={i}>{i}</option>)}</select></F>
-          <F label="Contact person" error={errors.contactPerson} required hint="Used to prefill your job posts and contact requests"><input style={inp} value={form.contactPerson} onChange={e=>s("contactPerson",e.target.value)} placeholder="e.g. Jane Doe, HR Manager"/></F>
-        </div>
-        <F label="Location" error={errors.location} required>
-          <SingleLocationPicker value={form.location} customValue={form.customLocation} onSelect={v=>s("location",v)} onCustomChange={v=>s("customLocation",v)}/>
-        </F>
+        <F label="Industry" error={errors.industry} required><select style={inp} value={form.industry} onChange={e=>s("industry",e.target.value)}><option value="">-- Select --</option>{INDUSTRIES.map(i=><option key={i}>{i}</option>)}</select></F>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
           <F label="Tax code" error={errors.taxCode} required><input style={inp} value={form.taxCode} onChange={e=>s("taxCode",e.target.value)}/></F>
           <F label="Company website" error={errors.website} required><input style={inp} value={form.website} onChange={e=>s("website",e.target.value)} placeholder="https://…"/></F>
@@ -1558,10 +1509,6 @@ function AdminPage(){
         ]);
         setJobs(freshJobs||[]);
         setCompanies(freshCompanies||[]);
-      }else if(destination==="companies"){
-        await sheetListMulti(["Companies"],true);
-        const freshCompanies=await ld(SK.COMPANIES,true);
-        setCompanies(freshCompanies||[]);
       }
       setTab(destination);
       await waitForReactCommit();
@@ -1586,13 +1533,6 @@ function AdminPage(){
     load();
   };
 
-  const deleteCompany=async(c)=>{
-    if(!window.confirm(`Delete company ${c.code} (${c.name||"no name"})? This permanently removes the company profile. This cannot be undone.`))return;
-    await deleteOne(SK.COMPANIES,"code",c.code);
-    setViewing(null);
-    load();
-  };
-
   return(
     <div style={{minHeight:"100vh",background:"var(--color-background-tertiary)",fontFamily:FONT}}>
       <style>{`
@@ -1603,7 +1543,7 @@ function AdminPage(){
         <div style={{color:"#fff",fontWeight:800,fontSize:22,letterSpacing:-1.2,marginRight:"1.5rem",paddingTop:14,paddingBottom:14,whiteSpace:"nowrap"}}>
           <span style={{opacity:0.45,fontWeight:400}}>pair</span><span style={{fontWeight:800}}>up</span> <span style={{opacity:.7,fontWeight:600,fontSize:14}}>· Admin</span>
         </div>
-        {[["dashboard","Dashboard","chart-bar"],["candidates","Talent Pool","users"],["jobs","Jobs","briefcase"],["companies","Companies","building"]].map(([id,label,icon])=>(
+        {[["dashboard","Dashboard","chart-bar"],["candidates","Talent Pool","users"],["jobs","Jobs","briefcase"]].map(([id,label,icon])=>(
           <button key={id} onClick={()=>selectAdminTab(id)} style={{background:"none",border:"none",cursor:"pointer",color:tab===id?"#fff":"rgba(255,255,255,0.58)",fontWeight:tab===id?700:400,fontSize:13,padding:"16px 14px",borderBottom:tab===id?"2px solid #7BA7F5":"2px solid transparent",display:"flex",alignItems:"center",gap:6}}>
             <Icon name={icon} size={15}/>{label}
           </button>
@@ -1627,35 +1567,22 @@ function AdminPage(){
         <>
         {tab==="dashboard"&&(
           stats?(
-            <div style={{display:"flex",flexDirection:"column",gap:28}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16}}>
               {[
-                ["Overview",[
-                  ["Total website visits",stats.totalVisits,"world"],
-                  ["Total job seekers",stats.totalJobSeekers,"user-search"],
-                  ["Total companies",stats.totalEmployers,"building"]
-                ]],
-                ["Job",[
-                  ["Total active jobs",stats.totalActiveJobs,"briefcase"],
-                  ["Total candidates",stats.totalApplications,"users"],
-                  ["Successful candidates",`${Number(stats.totalPassed||0).toLocaleString()}${stats.totalApplications?` (${Math.round((stats.totalPassed||0)/stats.totalApplications*100)}%)`:""}`,"circle-check"]
-                ]],
-                ["Contact request",[
-                  ["Total sent requests",stats.totalContactRequests,"send"],
-                  ["Total accepted",stats.totalAcceptedRequests,"circle-check"],
-                  ["Total denied",stats.totalDeniedRequests,"circle-x"]
-                ]]
-              ].map(([section,items])=>(
-                <div key={section}>
-                  <h2 style={{fontSize:13,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"0 0 10px"}}>{section}</h2>
-                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:16}}>
-                    {items.map(([label,value,icon])=>(
-                      <div key={label} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16,padding:"1.25rem",boxShadow:"0 6px 18px rgba(0,44,118,0.05)"}}>
-                        <div style={{width:40,height:40,borderRadius:12,background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:14}}><Icon name={icon} size={20} style={{color:BRAND}}/></div>
-                        <p style={{fontSize:28,fontWeight:800,color:BRAND,margin:"0 0 5px"}}>{typeof value==="string"?value:Number(value||0).toLocaleString()}</p>
-                        <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0,fontWeight:600}}>{label}</p>
-                      </div>
-                    ))}
-                  </div>
+                ["Total website visits",stats.totalVisits,"world"],
+                ["Registered job seekers",stats.totalJobSeekers,"user-search"],
+                ["Registered employers",stats.totalEmployers,"building"],
+                ["Total applications",stats.totalApplications,"file-text"],
+                ["Successful applicants",stats.totalPassed,"circle-check"],
+                ["Total active jobs",stats.totalActiveJobs,"briefcase"],
+                ["Contact requests sent",stats.totalContactRequests,"send"],
+                ["Accepted contact requests",stats.totalAcceptedRequests,"circle-check"],
+                ["Denied contact requests",stats.totalDeniedRequests,"circle-x"]
+              ].map(([label,value,icon])=>(
+                <div key={label} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16,padding:"1.25rem",boxShadow:"0 6px 18px rgba(0,44,118,0.05)"}}>
+                  <div style={{width:40,height:40,borderRadius:12,background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:14}}><Icon name={icon} size={20} style={{color:BRAND}}/></div>
+                  <p style={{fontSize:28,fontWeight:800,color:BRAND,margin:"0 0 5px"}}>{Number(value||0).toLocaleString()}</p>
+                  <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0,fontWeight:600}}>{label}</p>
                 </div>
               ))}
             </div>
@@ -1720,35 +1647,6 @@ function AdminPage(){
             </table>
           </div>
         )}
-
-        {tab==="companies"&&(
-          <div style={{overflowX:"auto",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:16}}>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-              <thead><tr style={{background:"var(--color-background-secondary)"}}>{["Code","Name","Industry","Location","Contact person","Email","Team size","Created",""].map(h=><th key={h} style={{textAlign:"left",padding:"10px 12px",fontWeight:700,fontSize:11,color:"var(--color-text-secondary)",whiteSpace:"nowrap",textTransform:"uppercase",letterSpacing:.5}}>{h}</th>)}</tr></thead>
-              <tbody>
-                {companies.map((c,i)=>(
-                  <tr key={c.code} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"var(--color-background-primary)":"var(--color-background-secondary)"}}>
-                    <td style={{padding:"10px 12px",fontFamily:"monospace",fontWeight:700,color:BRAND}}>{c.code}</td>
-                    <td style={{padding:"10px 12px",fontWeight:600}}>{c.name||"—"}</td>
-                    <td style={{padding:"10px 12px"}}>{c.industry&&<Badge color="purple">{c.industry}</Badge>}</td>
-                    <td style={{padding:"10px 12px"}}>{c.location||"—"}</td>
-                    <td style={{padding:"10px 12px",color:"var(--color-text-secondary)"}}>{c.contactPerson||"—"}</td>
-                    <td style={{padding:"10px 12px",color:"var(--color-text-secondary)"}}>{c.email||"—"}</td>
-                    <td style={{padding:"10px 12px"}}>{c.teamSize||"—"}</td>
-                    <td style={{padding:"10px 12px",color:"var(--color-text-secondary)"}}>{fmt(c.createdAt)}</td>
-                    <td style={{padding:"10px 12px",whiteSpace:"nowrap"}}>
-                      <div style={{display:"flex",gap:6}}>
-                        <Btn variant="ghost" onClick={()=>setViewing({kind:"company",data:c})} style={{fontSize:11,padding:"5px 10px"}}><Icon name="eye" size={13}/></Btn>
-                        <Btn variant="danger" onClick={()=>deleteCompany(c)} style={{fontSize:11,padding:"5px 10px"}}><Icon name="trash" size={13}/></Btn>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {companies.length===0&&<tr><td colSpan={9} style={{padding:"2.5rem",textAlign:"center",color:"var(--color-text-secondary)"}}>No companies registered.</td></tr>}
-              </tbody>
-            </table>
-          </div>
-        )}
         </>
         )}
       </div>
@@ -1758,7 +1656,7 @@ function AdminPage(){
         <div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:"1rem"}}>
           <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:640,maxHeight:"85vh",overflow:"auto",padding:"1.75rem"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1.25rem"}}>
-              <h3 style={{fontSize:16,fontWeight:800,margin:0,color:BRAND}}>{viewing.kind==="candidate"?`Candidate ${viewing.data.code}`:viewing.kind==="company"?`Company ${viewing.data.code}`:`Job ${viewing.data.code}`}</h3>
+              <h3 style={{fontSize:16,fontWeight:800,margin:0,color:BRAND}}>{viewing.kind==="candidate"?`Candidate ${viewing.data.code}`:`Job ${viewing.data.code}`}</h3>
               <button onClick={()=>setViewing(null)} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,width:30,height:30,borderRadius:"50%",fontSize:15,fontWeight:700}}>✕</button>
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px 20px"}}>
@@ -1770,7 +1668,7 @@ function AdminPage(){
               ))}
             </div>
             <div style={{marginTop:"1.5rem",display:"flex",justifyContent:"flex-end"}}>
-              <Btn variant="danger" onClick={()=>viewing.kind==="candidate"?deleteCandidate(viewing.data):viewing.kind==="company"?deleteCompany(viewing.data):deleteJob(viewing.data)}><Icon name="trash" size={14}/>Delete permanently</Btn>
+              <Btn variant="danger" onClick={()=>viewing.kind==="candidate"?deleteCandidate(viewing.data):deleteJob(viewing.data)}><Icon name="trash" size={14}/>Delete permanently</Btn>
             </div>
           </div>
         </div>
@@ -1862,7 +1760,6 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
     if(!form.name.trim())e.name="Required";
     if(!form.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/))e.email="Invalid email";
     if(!form.phone.trim())e.phone="Required";
-    if(!form.cvLink.trim())e.cvLink="Required";
     if(!form.position.trim())e.position="Required";
     if(!form.field)e.field="Required";
     if(form.locations.length===0)e.locations="Select at least one";
@@ -2010,7 +1907,7 @@ Response timestamp: ${respondedAt}`
       {/* CV Link */}
       <Card>
         <SH icon="link" title="CV / Resume"/>
-        <F label="CV link" error={errors.cvLink} required hint="Paste a shareable link to your CV (Google Drive, Dropbox, OneDrive, Notion, or another public link).">
+        <F label="CV link" hint="Paste a shareable link to your CV (Google Drive, Dropbox, OneDrive, Notion, or another public link).">
           <input style={inp} type="url" value={form.cvLink} onChange={e=>sf("cvLink",e.target.value)} placeholder="https://drive.google.com/..."/>
         </F>
         <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"-0.5rem 0 0"}}>Your CV link is private and will only be shared with an employer after you accept their contact request.</p>
@@ -2354,10 +2251,9 @@ Response timestamp: ${respondedAt}`
 function PublicPage({onRequest,session,company,initialCandidates=[]}){
   const [candidates,setCandidates]=useState(()=>initialCandidates.filter(c=>c.consentPool&&c.shareActive));
   const [filter,setFilter]=useState({location:"",industry:"",years:"",field:"",activelyExploring:""});
-  const [search,setSearch]=useState("");
   const [selected,setSelected]=useState(null);
   const [showContactForm,setShowContactForm]=useState(false);
-  const [reqForm,setReqForm]=useState({company:company?.name||"",contactName:company?.contactPerson||"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});
+  const [reqForm,setReqForm]=useState({company:company?.name||"",contactName:"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});
   const [reqErrors,setReqErrors]=useState({});
   const [reqSent,setReqSent]=useState(false);
   const [isSendingRequest,setIsSendingRequest]=useState(false);
@@ -2365,19 +2261,17 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
 
   useEffect(()=>{ld(SK.CANDIDATES,true).then(d=>setCandidates((d||[]).filter(c=>c.consentPool&&c.shareActive)));},[]);
 
-  const q=search.trim().toLowerCase();
   const filtered=candidates.filter(c=>
     (!filter.location||c.locations?.includes(filter.location))&&
     (!filter.industry||(c.industries||[]).includes(filter.industry))&&
     (!filter.years||c.years===filter.years)&&
     (!filter.field||c.field===filter.field)&&
-    (!filter.activelyExploring||c.activelyExploring===filter.activelyExploring)&&
-    (!q||[c.code,c.position,c.field,c.skills,(c.industries||[]).join(" "),(c.locations||[]).join(" "),stripHtml(c.intro)].filter(Boolean).join(" ").toLowerCase().includes(q))
+    (!filter.activelyExploring||c.activelyExploring===filter.activelyExploring)
   );
 
   const openCandidate=(c)=>{
     setSelected(c);setShowContactForm(false);
-    setReqSent(false);setReqForm({company:company?.name||"",contactName:company?.contactPerson||"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});setReqErrors({});
+    setReqSent(false);setReqForm({company:company?.name||"",contactName:"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});setReqErrors({});
   };
 
   const sendRequest=async()=>{
@@ -2420,12 +2314,6 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
     <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
       <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Talent Pool</h1>
       <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>Browse candidates who are open to new opportunities</p>
-
-      {/* Search */}
-      <div style={{position:"relative",marginBottom:"1rem"}}>
-        <Icon name="search" size={16} style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",color:"var(--color-text-secondary)"}}/>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search by position, skill, field, industry, location..." style={{...inp,padding:"10px 14px 10px 38px"}}/>
-      </div>
 
       {/* Filters */}
       <Card style={{marginBottom:"1.5rem"}}>
@@ -2562,14 +2450,7 @@ const ROUND_REASONS=["Over qualified","Under qualified","Lack of experience","Sa
 const DEFAULT_RECRUITMENT_PROCESS=RECRUITMENT_ROUNDS.map((name)=>({name,enabled:true,description:STAGE_DESCRIPTIONS[name]||""}));
 
 function PostJobPage({onBack,onSuccess,company,session}){
-  // Prefill from the employer's company profile so they don't have to
-  // re-type what's already on file — still editable per job (e.g. a role
-  // based in a different office than HQ, or a different point of contact).
-  const defaultContact=company?.contactPerson?`${company.contactPerson} — ${session?.email||""}`:(session?.email||"");
-  const defaultLocations=company?.location?[company.location]:[];
-  const jobLocationOptions=company?.location&&!LOCATIONS.includes(company.location)?[...LOCATIONS,company.location]:LOCATIONS;
-  const blankForm=()=>({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:defaultLocations,industries:[],field:"",contact:defaultContact,deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))});
-  const [form,setForm]=useState(blankForm);
+  const [form,setForm]=useState({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:[],industries:[],field:"",contact:"",deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))});
   const [errors,setErrors]=useState({});
   const [done,setDone]=useState(null);
   const [benefitsSaved,setBenefitsSaved]=useState(false);
@@ -2644,7 +2525,7 @@ function PostJobPage({onBack,onSuccess,company,session}){
         <p style={{fontFamily:"monospace",fontSize:36,fontWeight:800,color:BRAND,margin:0,letterSpacing:4}}>{done}</p>
       </div>
       <div style={{display:"flex",gap:10,justifyContent:"center"}}>
-        <Btn variant="outline" onClick={()=>{setDone(null);setForm(blankForm());setErrors({});}}>Post another job</Btn>
+        <Btn variant="outline" onClick={()=>{setDone(null);setForm({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:[],industries:[],field:"",contact:"",deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))});setErrors({});}}>Post another job</Btn>
         <Btn onClick={onBack}>Back to dashboard</Btn>
       </div>
     </div>
@@ -2669,7 +2550,7 @@ function PostJobPage({onBack,onSuccess,company,session}){
           <F label="Application deadline"><input style={inp} type="date" value={form.deadline} onChange={e=>s("deadline",e.target.value)}/></F>
         </div>
         <F label="Location(s)" error={errors.locations} required>
-          <PillSel options={jobLocationOptions} selected={form.locations} onToggle={tl} error={errors.locations}/>
+          <PillSel options={LOCATIONS} selected={form.locations} onToggle={tl} error={errors.locations}/>
         </F>
         <F label="Industry (select all that apply)" error={errors.industries} required>
           <IndustryPicker selected={form.industries} onToggle={ti} error={errors.industries}/>
@@ -2720,7 +2601,6 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   const [jobs,setJobs]=useState(()=>initialJobs.filter(j=>j.status==="active"));
   const [companies,setCompanies]=useState(initialCompanies);
   const [filter,setFilter]=useState({location:"",industry:"",years:"",field:""});
-  const [search,setSearch]=useState("");
   const [selected,setSelected]=useState(null);
   const [form,setForm]=useState({name:"",email:"",phone:"",cvLink:"",portfolio:"",salary:"",onboard:"",consent:false});
   const [errors,setErrors]=useState({});
@@ -2755,14 +2635,12 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
     return ()=>clearInterval(iv);
   },[]);
 
-  const filtered=jobs.filter(j=>{
-    const q=search.trim().toLowerCase();
-    return (!filter.location||(j.locations||[]).includes(filter.location))&&
+  const filtered=jobs.filter(j=>
+    (!filter.location||(j.locations||[]).includes(filter.location))&&
     (!filter.industry||(j.industries||[]).includes(filter.industry))&&
     (!filter.years||j.years===filter.years)&&
-    (!filter.field||j.field===filter.field)&&
-    (!q||[j.code,j.title,j.company,j.field,(j.industries||[]).join(" "),(j.locations||[]).join(" "),j.summary,j.requirements].filter(Boolean).join(" ").toLowerCase().includes(q));
-  });
+    (!filter.field||j.field===filter.field)
+  );
 
   const openJob=async(j)=>{
     setSelected(j);setSubmitted(false);setErrors({});
@@ -2820,10 +2698,6 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
     <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
       <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Jobs</h1>
       <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>Browse all active jobs posted on pairup.</p>
-      <div style={{position:"relative",marginBottom:"1rem"}}>
-        <Icon name="search" size={16} style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",color:"var(--color-text-secondary)"}}/>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search by job title, company, field, industry, location..." style={{...inp,padding:"10px 14px 10px 38px"}}/>
-      </div>
       <Card style={{marginBottom:"1.5rem"}}>
         <SH icon="filter" title="Filters"/>
         <FilterPills title="Location" options={LOCATIONS} value={filter.location} onChange={v=>setFilter(f=>({...f,location:v}))} inline={4}/>
@@ -2837,7 +2711,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
       </Card>
       <div style={{display:"flex",flexDirection:"column",gap:10}}>
         {filtered.map(j=>(
-          <div key={j.code} onClick={()=>openJob(j)} role="button" tabIndex={0} onKeyDown={e=>{if(e.key==="Enter")openJob(j);}} style={{textAlign:"left",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:14,padding:"1.25rem",cursor:"pointer",fontFamily:FONT}}>
+          <button key={j.code} onClick={()=>openJob(j)} style={{textAlign:"left",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:14,padding:"1.25rem",cursor:"pointer",fontFamily:FONT}}>
             <div style={{display:"flex",justifyContent:"space-between",gap:16,alignItems:"flex-start"}}>
               <div style={{flex:1}}>
                 <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:5}}><Badge color="blue">{j.field||"Job"}</Badge><span style={{fontFamily:"monospace",fontSize:11,color:BRAND_DIM}}>{j.code}</span></div>
@@ -2845,13 +2719,12 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
                 <p style={{fontSize:13,fontWeight:600,margin:"0 0 8px"}}>{j.company}</p>
                 <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}>{(j.locations||[]).join(" · ")} · {(j.industries||[]).join(", ")}{j.salary?` · ${j.salary}`:""}</p>
               </div>
-              <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
                 {appliedCodes.has(j.code)&&<Badge color="green">Applied</Badge>}
-                <button onClick={e=>{e.stopPropagation();openJob(j);}} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",color:BRAND,fontSize:12,fontWeight:700,fontFamily:FONT,padding:"8px 14px",borderRadius:8,whiteSpace:"nowrap"}}>View JD</button>
-                <Icon name="chevron-right" size={18} style={{color:BRAND_DIM}}/>
+                <Icon name="chevron-right" size={18} style={{color:BRAND_DIM,marginTop:5}}/>
               </div>
             </div>
-          </div>
+          </button>
         ))}
         {filtered.length===0&&<div style={{textAlign:"center",padding:"3rem",color:"var(--color-text-secondary)",background:"var(--color-background-primary)",borderRadius:16}}>No jobs match your filters.</div>}
       </div>
@@ -2993,29 +2866,15 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
     if(status==="Reject") nextRound="Rejected";
     if(status==="Pipeline") nextRound="Pipeline";
     const now=new Date().toISOString();
-    const stageStatusLabel=status==="next"?"Passed":(status==="Pipeline"?"Move to Pipeline":status);
-    const stageReason=(status==="next"||status==="Pipeline")?"":(reason||"");
     const stageData={...(app.stageData||{}),[round]:{
-      status:stageStatusLabel,
-      reason:stageReason,
+      status:status==="next"?"Passed":(status==="Pipeline"?"Move to Pipeline":status),
+      reason:(status==="next"||status==="Pipeline")?"":reason||"",
       note:note||"",
       updatedAt:now
     }};
     const applicationStatus=status==="Reject"?"rejected":(status==="Pass"?"passed":"processing");
-    // Timeline: append-only log of every status change, so the employer can see
-    // exactly when each move happened — not just the latest state per round.
-    const statusHistory=[...(app.statusHistory||[]),{round,status:stageStatusLabel,reason:stageReason,note:note||"",updatedAt:now}];
-    await updateApplication(app,{currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now,statusHistory});
-    setSelectedApp({...app,currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now,statusHistory});
-  };
-
-  // Lets the employer jot a note on a candidate without it counting as a status
-  // change (no timeline entry, no round move) — just persists the note text.
-  const saveNote=async(app,round,note)=>{
-    const now=new Date().toISOString();
-    const stageData={...(app.stageData||{}),[round]:{...(app.stageData||{})[round],note:note||"",updatedAt:now}};
-    await updateApplication(app,{stageData});
-    setSelectedApp(prev=>(prev&&prev.id===app.id)?{...prev,stageData}:prev);
+    await updateApplication(app,{currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now});
+    setSelectedApp({...app,currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now});
   };
 
   const viewApplication=async app=>{
@@ -3056,25 +2915,7 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"12px 24px",marginBottom:"1.25rem"}}>{[["Email",selectedCandidate?.email||selectedApp.email],["Phone",selectedCandidate?.phone||selectedApp.phone],["CV",selectedCandidate?.cvLink||selectedApp.cvLink],["Portfolio",selectedCandidate?.portfolio||selectedApp.portfolio],["Salary",selectedCandidate?.salary||selectedApp.salary],["Available",selectedCandidate?.onboard||selectedApp.onboard]].map(([l,v])=><div key={l}><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>{l}</p><p style={{fontSize:13,margin:0,wordBreak:"break-word"}}>{v||"—"}</p></div>)}</div>
                 <div style={{fontSize:13,lineHeight:1.7,margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selectedCandidate?.intro||"Application profile information."}}/>
                 {selectedStage.updatedAt&&<p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"0 0 1rem"}}>Last status update: {fmt(selectedStage.updatedAt)}</p>}
-                <StageAction key={selectedApp.id+"|"+selectedRound} app={selectedApp} round={selectedRound} onSave={(status,reason,note)=>moveCandidate(selectedApp,selectedRound,status,reason,note)} onSaveNote={note=>saveNote(selectedApp,selectedRound,note)} canNext={(()=>{const idx=process.findIndex(r=>r.name===selectedRound);return idx>=0&&idx<process.length-1&&selectedRound!=="Rejected"&&selectedRound!=="Pipeline";})()}/>
-                {selectedApp.statusHistory?.length>0&&(
-                  <div style={{marginTop:20,paddingTop:16,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
-                    <h4 style={{fontSize:12,fontWeight:800,color:BRAND,margin:"0 0 12px",textTransform:"uppercase",letterSpacing:1}}>Timeline</h4>
-                    <div style={{display:"flex",flexDirection:"column",gap:12}}>
-                      {[...selectedApp.statusHistory].reverse().map((h,i)=>(
-                        <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start"}}>
-                          <div style={{width:8,height:8,borderRadius:"50%",background:BRAND,marginTop:6,flexShrink:0}}/>
-                          <div style={{flex:1}}>
-                            <p style={{fontSize:13,margin:0}}><strong>{h.round}</strong>{" "}<Badge color={h.status==="Reject"?"red":h.status==="Pass"?"green":h.status==="Move to Pipeline"?"purple":"blue"}>{h.status}</Badge></p>
-                            {h.reason&&<p style={{fontSize:12,color:"var(--color-text-secondary)",margin:"3px 0 0"}}>Reason: {h.reason}</p>}
-                            {h.note&&<p style={{fontSize:12,color:"var(--color-text-secondary)",margin:"3px 0 0"}}>Note: {h.note}</p>}
-                            <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"3px 0 0"}}>{fmt(h.updatedAt)} · {new Date(h.updatedAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</p>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                <StageAction app={selectedApp} round={selectedRound} onSave={(status,reason,note)=>moveCandidate(selectedApp,selectedRound,status,reason,note)} canNext={(()=>{const idx=process.findIndex(r=>r.name===selectedRound);return idx>=0&&idx<process.length-1&&selectedRound!=="Rejected"&&selectedRound!=="Pipeline";})()}/>
               </div>}
           </Card>
         </div>
@@ -3208,12 +3049,11 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   </div>;
 }
 
-function StageAction({app,round,onSave,onSaveNote,canNext}){
+function StageAction({app,round,onSave,canNext}){
   const existing=(app.stageData||{})[round]||{};
   const [status,setStatus]=useState("");
   const [reason,setReason]=useState(existing.reason||"");
   const [note,setNote]=useState(existing.note||"");
-  const [justSaved,setJustSaved]=useState(false);
   const needsReason=status==="Reject";
   const chooseStatus=(value)=>{
     setStatus(value);
@@ -3221,11 +3061,6 @@ function StageAction({app,round,onSave,onSaveNote,canNext}){
       onSave(value,reason,note);
       setStatus("");
     }
-  };
-  const saveNoteOnly=()=>{
-    onSaveNote(note);
-    setJustSaved(true);
-    setTimeout(()=>setJustSaved(false),1800);
   };
   return <div style={{marginTop:12,paddingTop:12,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
     <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
@@ -3241,11 +3076,8 @@ function StageAction({app,round,onSave,onSaveNote,canNext}){
         <option value="">Select reason…</option>{ROUND_REASONS.map(r=><option key={r}>{r}</option>)}
       </select>}
       <input value={note} onChange={e=>setNote(e.target.value)} placeholder="Note for this candidate…" style={{flex:1,minWidth:220}}/>
-      <Btn variant="outline" onClick={saveNoteOnly} style={{padding:"8px 14px",whiteSpace:"nowrap"}}>
-        {justSaved?<><Icon name="check" size={14}/>Saved</>:<><Icon name="device-floppy" size={14}/>Save note</>}
-      </Btn>
     </div>
-    <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"8px 0 0"}}>Selecting a status applies the action immediately. Click "Save note" to save a note on its own.</p>
+    <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"8px 0 0"}}>Selecting a status applies the action immediately.</p>
   </div>;
 }
 
@@ -3326,19 +3158,19 @@ function CandidateModal({viewingC,onClose}){return <div style={{position:"fixed"
 
 // ── NOTIFICATIONS ─────────────────────────────────────────────────────────────
 function NotificationsPage({onRefresh,role,session,onBack}){
-  const [notifs,setNotifs]=useState(null); // null = still loading
+  const [notifs,setNotifs]=useState([]);
   const typeIcon={contact_request:"mail",response:"check-circle",job_posted:"briefcase",application:"file-text",system:"bell"};
 
   useEffect(()=>{
     (async()=>{
-      const matchValues=role==="jobseeker"
-        ?[session?.code,"jobseeker","all"]
-        :[session?.email,"employer","all"];
-      const scoped=((await fetchNotifList(matchValues))||[]).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      const all=((await ld(SK.NOTIFS,true))||[]).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
+      const scoped=all.filter(x=>role==="jobseeker"
+        ?(x.to===session?.code||x.to==="jobseeker"||x.to==="all")
+        :(x.to?.toLowerCase?.()===session?.email?.toLowerCase()||x.to==="employer"||x.to==="all"));
       setNotifs(scoped);
       const unread=scoped.filter(n=>!n.read);
       if(unread.length){
-        await markNotifsRead(unread.map(n=>n.id),scoped);
+        await markNotifsRead(unread.map(n=>n.id),all);
         onRefresh();
       }
     })();
@@ -3349,15 +3181,9 @@ function NotificationsPage({onRefresh,role,session,onBack}){
       <button onClick={onBack} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:13,fontWeight:600,fontFamily:FONT,marginBottom:"1.25rem",display:"flex",alignItems:"center",gap:6}}><Icon name="arrow-left" size={14}/>Back</button>
       <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Notifications</h1>
       <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>All new notifications appear here automatically.</p>
-      {notifs===null&&(
-        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,padding:"3rem"}}>
-          <Icon name="loader-2" size={22} style={{color:BRAND,animation:"spin 1s linear infinite"}}/>
-          <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>Loading notifications...</p>
-        </div>
-      )}
-      {notifs?.length===0&&<p style={{textAlign:"center",color:"var(--color-text-secondary)",padding:"3rem"}}>No notifications yet.</p>}
+      {notifs.length===0&&<p style={{textAlign:"center",color:"var(--color-text-secondary)",padding:"3rem"}}>No notifications yet.</p>}
       <div style={{display:"flex",flexDirection:"column",gap:10}}>
-        {notifs?.map(n=>(
+        {notifs.map(n=>(
           <div key={n.id} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:14,padding:"1.25rem"}}>
             <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
               <div style={{width:36,height:36,borderRadius:"50%",background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon name={typeIcon[n.type]||"bell"} size={16} style={{color:BRAND}}/></div>
@@ -3417,15 +3243,7 @@ function App(){
     })();
   },[]);
 
-  // Check / load company profile when an employer session starts. Deliberately
-  // does NOT depend on `refresh`: bump() fires after routine actions like
-  // updating a candidate's status, sending a request, or applying to a job —
-  // none of which change the company profile. Re-running this on every bump()
-  // used to flip companyChecked to false, which made the render below fall
-  // through to the full-page "PairUp is loading" screen and re-mount
-  // EmployerPage from scratch — wiping out whatever job/candidate the employer
-  // had open. Now it only runs when the session itself changes (login/logout),
-  // plus whenever the company profile is saved directly (onCompanyUpdated).
+  // Check / load company profile whenever an employer session is active
   useEffect(()=>{
     if(session?.role==="employer"){
       setCompanyChecked(false);
@@ -3436,7 +3254,7 @@ function App(){
         setCompanyChecked(true);
       })();
     }
-  },[session]);
+  },[session,refresh]);
 
   useEffect(()=>{
     const checkNotifs=async()=>{
