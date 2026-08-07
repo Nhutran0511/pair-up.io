@@ -4,11 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Pairup Recruitment Platform</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23002C76'/%3E%3Ctext x='32' y='45' font-family='Arial, Helvetica, sans-serif' font-size='38' font-weight='800' fill='%23ffffff' text-anchor='middle'%3EP%3C/text%3E%3C/svg%3E" />
   <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/bcryptjs/2.4.3/bcrypt.min.js"></script>
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
   <style>
     :root {
@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-07-notifs-timeline-fix";
+const APP_BUILD="2026-08-07-perf-stageback-nogoogle";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -47,7 +47,6 @@ async function getSheetUrl(){
   const override=(await ld(GSHEET_URL_KEY,true))||"";
   return override||DEFAULT_GSHEET_URL;
 }
-const GOOGLE_CLIENT_ID_KEY="pairup_google_client_id";
 const COMPANY_SIZES=["1–10","11–50","51–200","201–500","501–1000","1000+"];
 
 const INDUSTRIES=["Information Technology","Marketing & Communications","Finance & Banking","Retail & FMCG","Logistics & Supply Chain","Healthcare & Pharma","Education & Training","Manufacturing & Engineering","Real Estate","Game","Other"];
@@ -503,36 +502,7 @@ function isStrongPassword(pw){
 }
 
 // ── GOOGLE SIGN-IN ────────────────────────────────────────────────────────────
-// Uses Google Identity Services (loaded via <script> in <head>). Requires a real
-// Google Cloud OAuth Client ID configured by the site admin (via #admin settings) —
-// with no client ID configured, this simply isn't available yet. Any Google account
-// can be used; pairup only matches it against an *existing* local account by email
-// (it does not create new accounts via Google).
-function googleGetEmail(){
-  return new Promise((resolve,reject)=>{
-    (async()=>{
-      const clientId=(await ld(GOOGLE_CLIENT_ID_KEY,true))||"";
-      if(!clientId){reject(new Error("not_configured"));return;}
-      if(!window.google||!window.google.accounts||!window.google.accounts.oauth2){reject(new Error("gsi_not_loaded"));return;}
-      try{
-        const client=window.google.accounts.oauth2.initTokenClient({
-          client_id:clientId,
-          scope:"openid email profile",
-          callback:async(resp)=>{
-            if(!resp||!resp.access_token){reject(new Error("no_token"));return;}
-            try{
-              const r=await fetch("https://www.googleapis.com/oauth2/v3/userinfo",{headers:{Authorization:`Bearer ${resp.access_token}`}});
-              const info=await r.json();
-              if(info&&info.email) resolve(info.email); else reject(new Error("no_email"));
-            }catch(e){reject(e);}
-          },
-          error_callback:(err)=>reject(err||new Error("popup_failed"))
-        });
-        client.requestAccessToken();
-      }catch(e){reject(e);}
-    })();
-  });
-}
+// Removed — sign-in is email/password only now.
 
 const Icon=({name,size=18,style={}})=><span className={`ti ti-${name}`} style={{fontSize:size,lineHeight:1,...style}} aria-hidden="true"/>;
 
@@ -672,6 +642,11 @@ function GlobalInteractionLoading(){
       if(!(target instanceof Element))return;
       const button=target.closest("button");
       if(!button||button.disabled||button.matches(":disabled")||button.getAttribute("aria-disabled")==="true")return;
+      // Some actions (e.g. "Back" from Notifications) intentionally want an
+      // instant, un-blocked transition: show whatever's already known right
+      // away and let the destination quietly refresh in the background,
+      // rather than covering the screen with "PairUp is loading" while it does.
+      if(button.dataset.loadingSkip==="true")return;
       if(pendingOperations>0){
         isInteractionWindowOpen=true;
         clearTimer(interactionWindowTimeout);
@@ -1121,35 +1096,6 @@ function AuthPage({role,onAuthed,onBack}){
   };
 
   // ── Sign in with Google (matches an existing pairup account by email) ──────
-  const doGoogleSignIn=async()=>{
-    setNotice("");setErrors({});
-    setBusy(true);
-    try{
-      const email=await googleGetEmail();
-      const accounts=(await ld(accountsKey,true))||[];
-      const emailNorm=email.trim().toLowerCase();
-      const account=accounts.find(a=>a.email.toLowerCase()===emailNorm);
-      if(!account){
-        setBusy(false);
-        setNotice(`No pairup account found for ${email} under this role. Please sign up first, or make sure you selected the right role (${role==="jobseeker"?"Job Seeker":"Employer"}).`);
-        return;
-      }
-      const session={role,email:account.email,code:account.code,token:gid()+gid()};
-      await persistSession(session);
-      setBusy(false);
-      onAuthed(session);
-    }catch(err){
-      setBusy(false);
-      if(err&&err.message==="not_configured"){
-        setNotice("Google Sign-In isn't set up for this deployment yet — please use email/password.");
-      }else if(err&&err.message==="gsi_not_loaded"){
-        setNotice("Google Sign-In is still loading — please try again in a moment, or use email/password.");
-      }else{
-        setNotice("Google Sign-In was cancelled or failed. Please try again, or use email/password.");
-      }
-    }
-  };
-
   // ── Forgot / reset password ─────────────────────────────────────────────
   const doForgot=async()=>{
     if(!form.email.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)){setErrors({email:"Invalid email format"});return;}
@@ -1217,13 +1163,6 @@ function AuthPage({role,onAuthed,onBack}){
 
             {mode==="login"&&<>
               <p style={{fontSize:12.5,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"0 0 1.25rem"}}>By signing in, you agree to pairup's <a href="#" onClick={ev=>ev.preventDefault()} style={{color:BRAND}}>Terms &amp; Conditions</a> and <a href="#" onClick={ev=>ev.preventDefault()} style={{color:BRAND}}>Privacy Policy</a> in relation to your privacy information.</p>
-              <button type="button" onClick={doGoogleSignIn} disabled={busy} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:10,padding:"12px",border:`1px solid ${BRAND}`,borderRadius:8,background:"#fff",color:BRAND,fontWeight:700,fontSize:14,cursor:"pointer",fontFamily:FONT,marginBottom:"1.25rem"}}>
-                <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.9 32.5 29.4 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l6-6C34.5 6 29.5 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.9 19 13 24 13c3.1 0 5.8 1.1 8 3l6-6C34.5 6 29.5 4 24 4c-7.7 0-14.3 4.3-17.7 10.7z"/><path fill="#4CAF50" d="M24 44c5.3 0 10.1-2 13.7-5.4l-6.3-5.3C29.4 35 26.9 36 24 36c-5.4 0-9.9-3.5-11.3-8.3l-6.6 5.1C9.6 39.7 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.9 2.6-2.7 4.8-5 6.3l6.3 5.3C39.8 36.9 44 31.1 44 24c0-1.2-.1-2.3-.4-3.5z"/></svg>
-                Sign In with Google
-              </button>
-              <div style={{display:"flex",alignItems:"center",gap:12,margin:"0 0 1.25rem",color:"var(--color-text-secondary)",fontSize:12}}>
-                <div style={{flex:1,height:1,background:"var(--color-border-tertiary)"}}/>or<div style={{flex:1,height:1,background:"var(--color-border-tertiary)"}}/>
-              </div>
             </>}
 
             {mode==="signup"&&<p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"0 0 1.25rem"}}>{role==="jobseeker"?"One account per email address.":"One account represents one company."}</p>}
@@ -1369,7 +1308,6 @@ function CompanyProfilePage({session,onSaved,existing}){
 // ── SYNC SETTINGS (Google Sheets bridge URL) ──────────────────────────────────
 function SyncSettingsModal({onClose}){
   const [url,setUrl]=useState("");
-  const [clientId,setClientId]=useState("");
   const [saved,setSaved]=useState(false);
   const [testing,setTesting]=useState(false);
   const [testResults,setTestResults]=useState(null); // [{sheet, ok, message}]
@@ -1378,11 +1316,9 @@ function SyncSettingsModal({onClose}){
   const [emailResult,setEmailResult]=useState(null); // {ok, message}
   useEffect(()=>{
     ld(GSHEET_URL_KEY,true).then(u=>setUrl(u||""));
-    ld(GOOGLE_CLIENT_ID_KEY,true).then(c=>setClientId(c||""));
   },[]);
   const save=async()=>{
     await sd(GSHEET_URL_KEY,url.trim(),true);
-    await sd(GOOGLE_CLIENT_ID_KEY,clientId.trim(),true);
     setSaved(true);setTimeout(()=>setSaved(false),1800);
   };
   const checkOneSheet=async(activeUrl,sheetName)=>{
@@ -1456,8 +1392,6 @@ function SyncSettingsModal({onClose}){
         {emailResult&&(
           <div style={{background:emailResult.ok?"#E9F7EE":"#FFF1F0",border:`1px solid ${emailResult.ok?"#B7E4C7":"#FFC9C6"}`,borderRadius:10,padding:"0.6rem 0.9rem",marginBottom:"1.25rem",fontSize:12,color:emailResult.ok?"#1E6B3A":"#8A2A26",lineHeight:1.5}}>{emailResult.message}</div>
         )}
-        <p style={{fontSize:12,color:"var(--color-text-secondary)",lineHeight:1.6,margin:"1.25rem 0 1rem"}}>Google Sign-In requires an OAuth Client ID from Google Cloud Console with this page's origin added as an authorized JavaScript origin.</p>
-        <F label="Google OAuth Client ID"><input style={inp} value={clientId} onChange={e=>setClientId(e.target.value)} placeholder="xxxxxxxxxx.apps.googleusercontent.com"/></F>
         <Btn onClick={save} style={{width:"100%",justifyContent:"center"}}>{saved?"Saved ✓":"Save"}</Btn>
       </div>
     </div>
@@ -1840,10 +1774,14 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
     })();
   },[refresh]);
 
-  // Load requests whenever profile changes
+  // Load requests whenever profile changes. Uses the normal cache-aware,
+  // batched ldMany (not two separate forced-fresh calls) — those two forced-
+  // fresh fetches used to fire on every refresh() bump, including from
+  // completely unrelated actions like toggling "Share profile", which made
+  // that toggle feel slow even though it doesn't actually need this data.
   useEffect(()=>{
     if(profile?.code){
-      Promise.all([ld(SK.REQUESTS,true),ld(SK.APPLICATIONS,true)]).then(([r,a])=>{
+      ldMany({r:SK.REQUESTS,a:SK.APPLICATIONS}).then(({r,a})=>{
         setRequests((r||[]).filter(x=>x.candidateCode===profile.code));
         setAppliedJobs((a||[]).filter(x=>x.candidateCode===profile.code || (x.email&&x.email===profile.email)));
       });
@@ -2990,11 +2928,12 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
     const currentIndex=process.findIndex(r=>r.name===round);
     let nextRound=round;
     if(status==="next") nextRound=process[currentIndex+1]?.name||round;
+    if(status==="prev") nextRound=currentIndex>0?process[currentIndex-1].name:round;
     if(status==="Reject") nextRound="Rejected";
     if(status==="Pipeline") nextRound="Pipeline";
     const now=new Date().toISOString();
-    const stageStatusLabel=status==="next"?"Passed":(status==="Pipeline"?"Move to Pipeline":status);
-    const stageReason=(status==="next"||status==="Pipeline")?"":(reason||"");
+    const stageStatusLabel=status==="next"?"Passed":(status==="prev"?"Moved back":(status==="Pipeline"?"Move to Pipeline":status));
+    const stageReason=(status==="next"||status==="prev"||status==="Pipeline")?"":(reason||"");
     const stageData={...(app.stageData||{}),[round]:{
       status:stageStatusLabel,
       reason:stageReason,
@@ -3056,7 +2995,7 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"12px 24px",marginBottom:"1.25rem"}}>{[["Email",selectedCandidate?.email||selectedApp.email],["Phone",selectedCandidate?.phone||selectedApp.phone],["CV",selectedCandidate?.cvLink||selectedApp.cvLink],["Portfolio",selectedCandidate?.portfolio||selectedApp.portfolio],["Salary",selectedCandidate?.salary||selectedApp.salary],["Available",selectedCandidate?.onboard||selectedApp.onboard]].map(([l,v])=><div key={l}><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>{l}</p><p style={{fontSize:13,margin:0,wordBreak:"break-word"}}>{v||"—"}</p></div>)}</div>
                 <div style={{fontSize:13,lineHeight:1.7,margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selectedCandidate?.intro||"Application profile information."}}/>
                 {selectedStage.updatedAt&&<p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"0 0 1rem"}}>Last status update: {fmt(selectedStage.updatedAt)}</p>}
-                <StageAction key={selectedApp.id+"|"+selectedRound} app={selectedApp} round={selectedRound} onSave={(status,reason,note)=>moveCandidate(selectedApp,selectedRound,status,reason,note)} onSaveNote={note=>saveNote(selectedApp,selectedRound,note)} canNext={(()=>{const idx=process.findIndex(r=>r.name===selectedRound);return idx>=0&&idx<process.length-1&&selectedRound!=="Rejected"&&selectedRound!=="Pipeline";})()}/>
+                <StageAction key={selectedApp.id+"|"+selectedRound} app={selectedApp} round={selectedRound} onSave={(status,reason,note)=>moveCandidate(selectedApp,selectedRound,status,reason,note)} onSaveNote={note=>saveNote(selectedApp,selectedRound,note)} canNext={(()=>{const idx=process.findIndex(r=>r.name===selectedRound);return idx>=0&&idx<process.length-1&&selectedRound!=="Rejected"&&selectedRound!=="Pipeline";})()} canPrev={(()=>{const idx=process.findIndex(r=>r.name===selectedRound);return idx>0&&selectedRound!=="Rejected"&&selectedRound!=="Pipeline";})()}/>
                 {selectedApp.statusHistory?.length>0&&(
                   <div style={{marginTop:20,paddingTop:16,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
                     <h4 style={{fontSize:12,fontWeight:800,color:BRAND,margin:"0 0 12px",textTransform:"uppercase",letterSpacing:1}}>Timeline</h4>
@@ -3208,7 +3147,7 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   </div>;
 }
 
-function StageAction({app,round,onSave,onSaveNote,canNext}){
+function StageAction({app,round,onSave,onSaveNote,canNext,canPrev}){
   const existing=(app.stageData||{})[round]||{};
   const [status,setStatus]=useState("");
   const [reason,setReason]=useState(existing.reason||"");
@@ -3217,7 +3156,7 @@ function StageAction({app,round,onSave,onSaveNote,canNext}){
   const needsReason=status==="Reject";
   const chooseStatus=(value)=>{
     setStatus(value);
-    if(value==="Pending"||value==="Pass"||value==="Reject"||value==="next"||value==="Pipeline"){
+    if(value==="Pending"||value==="Pass"||value==="Reject"||value==="next"||value==="prev"||value==="Pipeline"){
       onSave(value,reason,note);
       setStatus("");
     }
@@ -3232,6 +3171,7 @@ function StageAction({app,round,onSave,onSaveNote,canNext}){
       <select value={status} onChange={e=>chooseStatus(e.target.value)} style={{width:"auto",minWidth:180}}>
         <option value="">Update status…</option>
         {canNext&&<option value="next">Move to next step</option>}
+        {canPrev&&<option value="prev">Go back a stage</option>}
         <option value="Pass">Pass</option>
         <option value="Reject">Reject</option>
         <option value="Pending">Pending</option>
@@ -3346,7 +3286,7 @@ function NotificationsPage({onRefresh,role,session,onBack}){
 
   return(
     <div style={{maxWidth:680,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
-      <button onClick={onBack} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:13,fontWeight:600,fontFamily:FONT,marginBottom:"1.25rem",display:"flex",alignItems:"center",gap:6}}><Icon name="arrow-left" size={14}/>Back</button>
+      <button onClick={onBack} data-loading-skip="true" style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:13,fontWeight:600,fontFamily:FONT,marginBottom:"1.25rem",display:"flex",alignItems:"center",gap:6}}><Icon name="arrow-left" size={14}/>Back</button>
       <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Notifications</h1>
       <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>All new notifications appear here automatically.</p>
       {notifs===null&&(
