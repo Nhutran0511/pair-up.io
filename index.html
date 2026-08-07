@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-07-admin-companies-search";
+const APP_BUILD="2026-08-07-notifs-timeline-fix";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -410,6 +410,20 @@ async function markNotifsRead(ids,allNotifs){
   const idSet=new Set(ids);
   const updated=(allNotifs||[]).map(n=>idSet.has(n.id)?{...n,read:true}:n);
   await sd(SK.NOTIFS,updated,true);
+}
+
+// Lightweight notifications list: asks the backend to filter by "to" server-
+// side (returning only this visitor's own rows) instead of downloading the
+// entire, ever-growing Notifications table and filtering client-side. Falls
+// back to the old full-table read if an older Apps Script deployment doesn't
+// recognize the action yet.
+async function fetchNotifList(matchValues){
+  const composite=await postCompositeAction("notif_list",{matchValues});
+  if(composite.supported) return composite.success?(composite.rows||[]):null;
+  const all=await ld(SK.NOTIFS,true);
+  if(all===null) return null;
+  const matchSet=new Set(matchValues.map(v=>String(v||"").toLowerCase()));
+  return all.filter(x=>matchSet.has(String(x.to||"").toLowerCase()));
 }
 
 async function loadDashboardStats(){
@@ -941,7 +955,7 @@ function Nav({page,onNavigate,notifCount,role,onLogout,onDeleteAccount,onOpenSyn
       {showSync&&<button onClick={onOpenSync} title="Google Sheets sync" aria-label="Sync settings" style={{marginLeft:"auto",width:40,height:40,border:"none",background:"none",color:"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10}}>
         <Icon name="cloud" size={19}/>
       </button>}
-      <button onClick={onOpenNotifs} title="Notifications" aria-label="Notifications" style={{position:"relative",width:40,height:40,border:"none",background:"none",color:page==="notifications"?"#fff":"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10,marginLeft:showSync?0:"auto"}}>
+      <button onClick={onOpenNotifs} data-loading-immediate="true" title="Notifications" aria-label="Notifications" style={{position:"relative",width:40,height:40,border:"none",background:"none",color:page==="notifications"?"#fff":"rgba(255,255,255,0.72)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",borderRadius:10,marginLeft:showSync?0:"auto"}}>
         <Icon name="bell" size={20}/>
         {notifCount>0&&<span style={{position:"absolute",top:2,right:1,minWidth:16,height:16,padding:"0 4px",borderRadius:99,background:"#FF6B6B",color:"#fff",fontSize:10,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center"}}>{notifCount>99?"99+":notifCount}</span>}
       </button>
@@ -2979,15 +2993,29 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
     if(status==="Reject") nextRound="Rejected";
     if(status==="Pipeline") nextRound="Pipeline";
     const now=new Date().toISOString();
+    const stageStatusLabel=status==="next"?"Passed":(status==="Pipeline"?"Move to Pipeline":status);
+    const stageReason=(status==="next"||status==="Pipeline")?"":(reason||"");
     const stageData={...(app.stageData||{}),[round]:{
-      status:status==="next"?"Passed":(status==="Pipeline"?"Move to Pipeline":status),
-      reason:(status==="next"||status==="Pipeline")?"":reason||"",
+      status:stageStatusLabel,
+      reason:stageReason,
       note:note||"",
       updatedAt:now
     }};
     const applicationStatus=status==="Reject"?"rejected":(status==="Pass"?"passed":"processing");
-    await updateApplication(app,{currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now});
-    setSelectedApp({...app,currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now});
+    // Timeline: append-only log of every status change, so the employer can see
+    // exactly when each move happened — not just the latest state per round.
+    const statusHistory=[...(app.statusHistory||[]),{round,status:stageStatusLabel,reason:stageReason,note:note||"",updatedAt:now}];
+    await updateApplication(app,{currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now,statusHistory});
+    setSelectedApp({...app,currentRound:nextRound,stageData,status:applicationStatus,lastStatusUpdate:now,statusHistory});
+  };
+
+  // Lets the employer jot a note on a candidate without it counting as a status
+  // change (no timeline entry, no round move) — just persists the note text.
+  const saveNote=async(app,round,note)=>{
+    const now=new Date().toISOString();
+    const stageData={...(app.stageData||{}),[round]:{...(app.stageData||{})[round],note:note||"",updatedAt:now}};
+    await updateApplication(app,{stageData});
+    setSelectedApp(prev=>(prev&&prev.id===app.id)?{...prev,stageData}:prev);
   };
 
   const viewApplication=async app=>{
@@ -3028,7 +3056,25 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"12px 24px",marginBottom:"1.25rem"}}>{[["Email",selectedCandidate?.email||selectedApp.email],["Phone",selectedCandidate?.phone||selectedApp.phone],["CV",selectedCandidate?.cvLink||selectedApp.cvLink],["Portfolio",selectedCandidate?.portfolio||selectedApp.portfolio],["Salary",selectedCandidate?.salary||selectedApp.salary],["Available",selectedCandidate?.onboard||selectedApp.onboard]].map(([l,v])=><div key={l}><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>{l}</p><p style={{fontSize:13,margin:0,wordBreak:"break-word"}}>{v||"—"}</p></div>)}</div>
                 <div style={{fontSize:13,lineHeight:1.7,margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selectedCandidate?.intro||"Application profile information."}}/>
                 {selectedStage.updatedAt&&<p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"0 0 1rem"}}>Last status update: {fmt(selectedStage.updatedAt)}</p>}
-                <StageAction app={selectedApp} round={selectedRound} onSave={(status,reason,note)=>moveCandidate(selectedApp,selectedRound,status,reason,note)} canNext={(()=>{const idx=process.findIndex(r=>r.name===selectedRound);return idx>=0&&idx<process.length-1&&selectedRound!=="Rejected"&&selectedRound!=="Pipeline";})()}/>
+                <StageAction key={selectedApp.id+"|"+selectedRound} app={selectedApp} round={selectedRound} onSave={(status,reason,note)=>moveCandidate(selectedApp,selectedRound,status,reason,note)} onSaveNote={note=>saveNote(selectedApp,selectedRound,note)} canNext={(()=>{const idx=process.findIndex(r=>r.name===selectedRound);return idx>=0&&idx<process.length-1&&selectedRound!=="Rejected"&&selectedRound!=="Pipeline";})()}/>
+                {selectedApp.statusHistory?.length>0&&(
+                  <div style={{marginTop:20,paddingTop:16,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+                    <h4 style={{fontSize:12,fontWeight:800,color:BRAND,margin:"0 0 12px",textTransform:"uppercase",letterSpacing:1}}>Timeline</h4>
+                    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                      {[...selectedApp.statusHistory].reverse().map((h,i)=>(
+                        <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+                          <div style={{width:8,height:8,borderRadius:"50%",background:BRAND,marginTop:6,flexShrink:0}}/>
+                          <div style={{flex:1}}>
+                            <p style={{fontSize:13,margin:0}}><strong>{h.round}</strong>{" "}<Badge color={h.status==="Reject"?"red":h.status==="Pass"?"green":h.status==="Move to Pipeline"?"purple":"blue"}>{h.status}</Badge></p>
+                            {h.reason&&<p style={{fontSize:12,color:"var(--color-text-secondary)",margin:"3px 0 0"}}>Reason: {h.reason}</p>}
+                            {h.note&&<p style={{fontSize:12,color:"var(--color-text-secondary)",margin:"3px 0 0"}}>Note: {h.note}</p>}
+                            <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"3px 0 0"}}>{fmt(h.updatedAt)} · {new Date(h.updatedAt).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>}
           </Card>
         </div>
@@ -3162,11 +3208,12 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
   </div>;
 }
 
-function StageAction({app,round,onSave,canNext}){
+function StageAction({app,round,onSave,onSaveNote,canNext}){
   const existing=(app.stageData||{})[round]||{};
   const [status,setStatus]=useState("");
   const [reason,setReason]=useState(existing.reason||"");
   const [note,setNote]=useState(existing.note||"");
+  const [justSaved,setJustSaved]=useState(false);
   const needsReason=status==="Reject";
   const chooseStatus=(value)=>{
     setStatus(value);
@@ -3174,6 +3221,11 @@ function StageAction({app,round,onSave,canNext}){
       onSave(value,reason,note);
       setStatus("");
     }
+  };
+  const saveNoteOnly=()=>{
+    onSaveNote(note);
+    setJustSaved(true);
+    setTimeout(()=>setJustSaved(false),1800);
   };
   return <div style={{marginTop:12,paddingTop:12,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
     <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
@@ -3189,8 +3241,11 @@ function StageAction({app,round,onSave,canNext}){
         <option value="">Select reason…</option>{ROUND_REASONS.map(r=><option key={r}>{r}</option>)}
       </select>}
       <input value={note} onChange={e=>setNote(e.target.value)} placeholder="Note for this candidate…" style={{flex:1,minWidth:220}}/>
+      <Btn variant="outline" onClick={saveNoteOnly} style={{padding:"8px 14px",whiteSpace:"nowrap"}}>
+        {justSaved?<><Icon name="check" size={14}/>Saved</>:<><Icon name="device-floppy" size={14}/>Save note</>}
+      </Btn>
     </div>
-    <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"8px 0 0"}}>Selecting a status applies the action immediately.</p>
+    <p style={{fontSize:11,color:"var(--color-text-secondary)",margin:"8px 0 0"}}>Selecting a status applies the action immediately. Click "Save note" to save a note on its own.</p>
   </div>;
 }
 
@@ -3271,19 +3326,19 @@ function CandidateModal({viewingC,onClose}){return <div style={{position:"fixed"
 
 // ── NOTIFICATIONS ─────────────────────────────────────────────────────────────
 function NotificationsPage({onRefresh,role,session,onBack}){
-  const [notifs,setNotifs]=useState([]);
+  const [notifs,setNotifs]=useState(null); // null = still loading
   const typeIcon={contact_request:"mail",response:"check-circle",job_posted:"briefcase",application:"file-text",system:"bell"};
 
   useEffect(()=>{
     (async()=>{
-      const all=((await ld(SK.NOTIFS,true))||[]).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
-      const scoped=all.filter(x=>role==="jobseeker"
-        ?(x.to===session?.code||x.to==="jobseeker"||x.to==="all")
-        :(x.to?.toLowerCase?.()===session?.email?.toLowerCase()||x.to==="employer"||x.to==="all"));
+      const matchValues=role==="jobseeker"
+        ?[session?.code,"jobseeker","all"]
+        :[session?.email,"employer","all"];
+      const scoped=((await fetchNotifList(matchValues))||[]).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
       setNotifs(scoped);
       const unread=scoped.filter(n=>!n.read);
       if(unread.length){
-        await markNotifsRead(unread.map(n=>n.id),all);
+        await markNotifsRead(unread.map(n=>n.id),scoped);
         onRefresh();
       }
     })();
@@ -3294,9 +3349,15 @@ function NotificationsPage({onRefresh,role,session,onBack}){
       <button onClick={onBack} style={{background:"none",border:"none",cursor:"pointer",color:BRAND,fontSize:13,fontWeight:600,fontFamily:FONT,marginBottom:"1.25rem",display:"flex",alignItems:"center",gap:6}}><Icon name="arrow-left" size={14}/>Back</button>
       <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Notifications</h1>
       <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>All new notifications appear here automatically.</p>
-      {notifs.length===0&&<p style={{textAlign:"center",color:"var(--color-text-secondary)",padding:"3rem"}}>No notifications yet.</p>}
+      {notifs===null&&(
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,padding:"3rem"}}>
+          <Icon name="loader-2" size={22} style={{color:BRAND,animation:"spin 1s linear infinite"}}/>
+          <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>Loading notifications...</p>
+        </div>
+      )}
+      {notifs?.length===0&&<p style={{textAlign:"center",color:"var(--color-text-secondary)",padding:"3rem"}}>No notifications yet.</p>}
       <div style={{display:"flex",flexDirection:"column",gap:10}}>
-        {notifs.map(n=>(
+        {notifs?.map(n=>(
           <div key={n.id} style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:14,padding:"1.25rem"}}>
             <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
               <div style={{width:36,height:36,borderRadius:"50%",background:BRAND_LIGHT,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><Icon name={typeIcon[n.type]||"bell"} size={16} style={{color:BRAND}}/></div>
@@ -3356,7 +3417,15 @@ function App(){
     })();
   },[]);
 
-  // Check / load company profile whenever an employer session is active
+  // Check / load company profile when an employer session starts. Deliberately
+  // does NOT depend on `refresh`: bump() fires after routine actions like
+  // updating a candidate's status, sending a request, or applying to a job —
+  // none of which change the company profile. Re-running this on every bump()
+  // used to flip companyChecked to false, which made the render below fall
+  // through to the full-page "PairUp is loading" screen and re-mount
+  // EmployerPage from scratch — wiping out whatever job/candidate the employer
+  // had open. Now it only runs when the session itself changes (login/logout),
+  // plus whenever the company profile is saved directly (onCompanyUpdated).
   useEffect(()=>{
     if(session?.role==="employer"){
       setCompanyChecked(false);
@@ -3367,7 +3436,7 @@ function App(){
         setCompanyChecked(true);
       })();
     }
-  },[session,refresh]);
+  },[session]);
 
   useEffect(()=>{
     const checkNotifs=async()=>{
