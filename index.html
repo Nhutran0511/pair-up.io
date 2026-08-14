@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-12-overview-talent-company-pool";
+const APP_BUILD="2026-08-12-save-feedback-cache-tune";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -51,7 +51,9 @@ const COMPANY_SIZES=["1–10","11–50","51–200","201–500","501–1000","100
 
 const INDUSTRIES=["Information Technology","Marketing & Communications","Finance & Banking","Retail & FMCG","Logistics & Supply Chain","Healthcare & Pharma","Education & Training","Manufacturing & Engineering","Real Estate","Game","Other"];
 const FIELDS=["Marketing","Human Resources","Finance","Information Technology","Sales","Operations","Legal","Product","Design","Engineering","Customer Success","Data & Analytics","Content & Creative","Other"];
-const LOCATIONS=["Ho Chi Minh City","Hanoi","Da Nang","Remote"];
+const LOCATIONS=["Ho Chi Minh City","Hanoi","Da Nang"];
+const WORKING_MODELS=["Onsite","Remote","Hybrid"];
+const CONTRACT_TYPES=["Full-time","Part-time","Freelancer"];
 const LANG_OPTS=["English","Vietnamese","Japanese","Korean","Chinese","French","German","Spanish","Thai","Other"];
 const PROFICIENCY=["Native","Fluent","Advanced","Intermediate","Basic"];
 const YEARS_OPTS=["Fresher (0–1 yr)","1–2 years","3–5 years","5–7 years","7–10 years","10+ years"];
@@ -167,7 +169,7 @@ function stripHtml(html){if(!html)return"";return html.replace(/<[^>]*>/g," ").r
 // This dedupes concurrent requests for the same sheet into a single round-trip,
 // and keeps that result fresh for a few seconds so a burst of reads (e.g. a page
 // with several components mounting at once) only costs one network call.
-const SHEET_CACHE_TTL_MS=8000;
+const SHEET_CACHE_TTL_MS=12000;
 const _sheetCache={}; // sheetName -> {ts, promise}
 async function sheetList(sheetName,fresh=false){
   const now=Date.now();
@@ -728,6 +730,48 @@ const PillSel=({options,selected,onToggle,error})=>(
   </div>
 );
 
+// Exclusive (single-value) pill group — same visual style as PillSel/FilterPills
+// but for a single choice in a data-entry form (Working Model, Type of contract).
+const SingleSelectPills=({options,value,onChange,error})=>(
+  <div>
+    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+      {options.map(o=><button key={o} type="button" onClick={()=>onChange(value===o?"":o)} style={{padding:"5px 14px",borderRadius:99,border:value===o?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:value===o?BRAND_LIGHT:"none",color:value===o?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:12,fontWeight:value===o?700:400,fontFamily:FONT,transition:"all 0.12s"}}>{o}</button>)}
+    </div>
+    {error&&<p style={{fontSize:11,color:"#E24B4A",margin:"4px 0 0"}}>{error}</p>}
+  </div>
+);
+
+// Multi-select location picker with an "Others" pill that reveals a free-text
+// input — used for preferred/job locations (unlike the company profile's
+// single HQ location). Keeps the same flat string-array data shape as before
+// (["Ho Chi Minh City", <custom text>, ...]) so existing filtering code needs
+// no changes: standard cities are toggled normally, and the one custom entry
+// (if any) rides along in the same array.
+const MultiLocationPicker=({selected=[],onChange,error})=>{
+  const customValue=selected.find(v=>!LOCATIONS.includes(v))||"";
+  const [othersOpen,setOthersOpen]=useState(!!customValue);
+  const standardSelected=selected.filter(v=>LOCATIONS.includes(v));
+  const toggleStandard=loc=>{
+    const next=standardSelected.includes(loc)?standardSelected.filter(x=>x!==loc):[...standardSelected,loc];
+    onChange(customValue?[...next,customValue]:next);
+  };
+  const toggleOthers=()=>{
+    if(othersOpen){setOthersOpen(false);onChange(standardSelected);}
+    else{setOthersOpen(true);}
+  };
+  const setCustom=text=>onChange(text.trim()?[...standardSelected,text]:standardSelected);
+  return (
+    <div>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+        {LOCATIONS.map(o=><button key={o} type="button" onClick={()=>toggleStandard(o)} style={{padding:"5px 14px",borderRadius:99,border:standardSelected.includes(o)?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:standardSelected.includes(o)?BRAND_LIGHT:"none",color:standardSelected.includes(o)?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:12,fontWeight:standardSelected.includes(o)?700:400,fontFamily:FONT,transition:"all 0.12s"}}>{o}</button>)}
+        <button type="button" onClick={toggleOthers} style={{padding:"5px 14px",borderRadius:99,border:othersOpen?`1.5px solid ${BRAND}`:"0.5px solid var(--color-border-secondary)",background:othersOpen?BRAND_LIGHT:"none",color:othersOpen?BRAND:"var(--color-text-secondary)",cursor:"pointer",fontSize:12,fontWeight:othersOpen?700:400,fontFamily:FONT,display:"flex",alignItems:"center",gap:4}}><Icon name="plus" size={12}/>Others</button>
+      </div>
+      {othersOpen&&<input style={{...inp,marginTop:8}} value={customValue} onChange={e=>setCustom(e.target.value)} placeholder="Enter your location"/>}
+      {error&&<p style={{fontSize:11,color:"#E24B4A",margin:"4px 0 0"}}>{error}</p>}
+    </div>
+  );
+};
+
 // Single-select location picker with an "Others" pill that reveals a free-text
 // input — used on the employer's company profile, where a company has one
 // registered HQ location (unlike job postings, which can target several).
@@ -1247,6 +1291,7 @@ function CompanyProfilePage({session,onSaved,existing}){
     customLocation:existingLocationIsCustom?existing.location:""
   }:blank);
   const [errors,setErrors]=useState({});
+  const [saving,setSaving]=useState(false);
   const s=(k,v)=>setForm(f=>({...f,[k]:v}));
 
   const validate=()=>{
@@ -1266,6 +1311,7 @@ function CompanyProfilePage({session,onSaved,existing}){
 
   const submit=async()=>{
     const e=validate();if(Object.keys(e).length){setErrors(e);return;}
+    setSaving(true);
     const finalLocation=form.location==="Others"?form.customLocation.trim():form.location;
     const company={
       name:form.name,industry:form.industry,taxCode:form.taxCode,address:form.address,intro:form.intro,
@@ -1273,6 +1319,7 @@ function CompanyProfilePage({session,onSaved,existing}){
       code:session.code,email:session.email,createdAt:new Date().toISOString()
     };
     await saveOne(SK.COMPANIES,company,"code");
+    setSaving(false);
     onSaved(company);
   };
 
@@ -1300,7 +1347,7 @@ function CompanyProfilePage({session,onSaved,existing}){
         <F label="Number of employees" error={errors.teamSize} required><select style={inp} value={form.teamSize} onChange={e=>s("teamSize",e.target.value)}><option value="">-- Select --</option>{COMPANY_SIZES.map(sz=><option key={sz}>{sz}</option>)}</select></F>
         <F label="Company overview" error={errors.intro} required hint="A short introduction about your company"><textarea style={{...inp,minHeight:100}} value={form.intro} onChange={e=>s("intro",e.target.value)}/></F>
       </Card>
-      <Btn onClick={submit} style={{width:"100%",justifyContent:"center",padding:"13px"}}>Save and continue →</Btn>
+      <Btn onClick={submit} disabled={saving} data-loading-immediate="true" style={{width:"100%",justifyContent:"center",padding:"13px",opacity:saving?0.7:1}}>{saving?"Saving...":"Save and continue →"}</Btn>
     </div>
   );
 }
@@ -1349,7 +1396,7 @@ function SyncSettingsModal({onClose}){
       // Unlike the real send_email calls in the app (fire-and-forget, mode:"no-cors",
       // so failures are invisible), this reads the actual JSON response so we can
       // tell whether MailApp is actually authorized/working.
-      const res=await fetch(activeUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"send_email",to:testEmail.trim(),subject:"pairup test email",body:"If you received this, email sending from Apps Script is working correctly."})});
+      const res=await fetch(activeUrl,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({action:"send_email",to:testEmail.trim(),subject:"pairup test email",body:"If you received this, email sending from Apps Script is working correctly.",immediate:true})});
       const text=await res.text();
       let data;
       try{ data=JSON.parse(text); }
@@ -1745,7 +1792,7 @@ function RoleSelection({onSelect}){
 // ── MY PROFILE ────────────────────────────────────────────────────────────────
 function CandidatePage({onSubmit,refresh,session,initialTab}){
   const LKEY="pairup_my_profile_"+session.email;
-  const blank={name:"",email:session.email,phone:"",social:"",position:"",field:"",locations:[],industries:[],skills:"",years:"",languages:[],intro:"",onboard:"",salary:"",portfolio:"",cvLink:"",activelyExploring:"",consentPool:false,consentStore:false};
+  const blank={name:"",email:session.email,phone:"",social:"",position:"",field:"",locations:[],workingModel:[],contractType:"",industries:[],skills:"",years:"",languages:[],intro:"",onboard:"",salary:"",portfolio:"",cvLink:"",activelyExploring:"",consentPool:false,consentStore:false};
   const [profile,setProfile]=useState(null); // null = not yet loaded
   const [ready,setReady]=useState(false);    // true once storage check done
   const [mode,setMode]=useState("view");     // "view" | "edit"
@@ -1758,6 +1805,8 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
   const [shareOn,setShareOn]=useState(false);
   const [appliedJobs,setAppliedJobs]=useState([]);
   const [profileEvents,setProfileEvents]=useState([]);
+  const [saving,setSaving]=useState(false);
+  const [justSaved,setJustSaved]=useState(false);
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
 
   // Load profile from storage once. The per-browser LKEY cache is just a fast
@@ -1806,6 +1855,8 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
     if(!form.position.trim())e.position="Required";
     if(!form.field)e.field="Required";
     if(form.locations.length===0)e.locations="Select at least one";
+    if(!form.workingModel.length)e.workingModel="Select at least one";
+    if(!form.contractType)e.contractType="Required";
     if(form.industries.length===0)e.industries="Select at least one";
     if(!form.skills.trim())e.skills="Required";
     if(!form.years)e.years="Required";
@@ -1819,7 +1870,7 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
 
   const openEdit=()=>{
     const s=profile||{};
-    setForm({name:s.name||"",email:s.email||"",phone:s.phone||"",social:s.social||"",position:s.position||"",field:s.field||"",locations:s.locations||[],industries:s.industries||[],skills:s.skills||"",years:s.years||"",languages:s.languages||[],intro:s.intro||"",onboard:s.onboard||"",salary:s.salary||"",portfolio:s.portfolio||"",cvLink:s.cvLink||"",activelyExploring:s.activelyExploring||"",consentPool:s.shareActive||false,consentStore:!!s.code});
+    setForm({name:s.name||"",email:s.email||"",phone:s.phone||"",social:s.social||"",position:s.position||"",field:s.field||"",locations:s.locations||[],workingModel:Array.isArray(s.workingModel)?s.workingModel:(s.workingModel?[s.workingModel]:[]),contractType:s.contractType||"",industries:s.industries||[],skills:s.skills||"",years:s.years||"",languages:s.languages||[],intro:s.intro||"",onboard:s.onboard||"",salary:s.salary||"",portfolio:s.portfolio||"",cvLink:s.cvLink||"",activelyExploring:s.activelyExploring||"",consentPool:s.shareActive||false,consentStore:!!s.code});
     setErrors({});setMode("edit");
   };
 
@@ -1832,17 +1883,29 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
 
   const doSubmit=async()=>{
     const e=validate();if(Object.keys(e).length){setErrors(e);return;}
+    setSaving(true);
     const code=session.code;
     const c={...form,code,createdAt:new Date().toISOString(),status:"active",shareActive:form.consentPool};
-    if(!(await persist(c)))return;
+    const ok=await persist(c);
+    setSaving(false);
+    if(!ok)return;
     setProfile(c);setShareOn(form.consentPool);setSubmitted(code);onSubmit();
   };
 
   const doUpdate=async()=>{
     const e=validate();if(Object.keys(e).length){setErrors(e);return;}
+    setSaving(true);
     const c={...profile,...form,updatedAt:new Date().toISOString(),shareActive:form.consentPool};
-    if(!(await persist(c)))return;
+    const ok=await persist(c);
+    setSaving(false);
+    if(!ok)return;
     setProfile(c);setMode("view");onSubmit();
+    // Make the "did this actually save?" moment unambiguous: flash a
+    // confirmation banner on the profile view for a couple seconds right
+    // after landing back on it, instead of silently switching modes with no
+    // feedback (which is what made saves feel like they'd gone nowhere).
+    setJustSaved(true);
+    setTimeout(()=>setJustSaved(false),3000);
   };
 
   const doRespond=async(req,action)=>{
@@ -1980,8 +2043,16 @@ Response timestamp: ${respondedAt}`
           </F>
         </div>
         <F label="Preferred location(s)" error={errors.locations} required>
-          <PillSel options={LOCATIONS} selected={form.locations} onToggle={l=>sf("locations",form.locations.includes(l)?form.locations.filter(x=>x!==l):[...form.locations,l])} error={errors.locations}/>
+          <MultiLocationPicker selected={form.locations} onChange={v=>sf("locations",v)} error={errors.locations}/>
         </F>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
+          <F label="Working model (select all that apply)" error={errors.workingModel} required>
+            <PillSel options={WORKING_MODELS} selected={form.workingModel} onToggle={v=>sf("workingModel",form.workingModel.includes(v)?form.workingModel.filter(x=>x!==v):[...form.workingModel,v])} error={errors.workingModel}/>
+          </F>
+          <F label="Type of contract" error={errors.contractType} required>
+            <SingleSelectPills options={CONTRACT_TYPES} value={form.contractType} onChange={v=>sf("contractType",v)} error={errors.contractType}/>
+          </F>
+        </div>
         <F label="Industry (select all that apply)" error={errors.industries} required>
           <IndustryPicker selected={form.industries} onToggle={i=>sf("industries",form.industries.includes(i)?form.industries.filter(x=>x!==i):[...form.industries,i])} error={errors.industries}/>
         </F>
@@ -2043,8 +2114,8 @@ Response timestamp: ${respondedAt}`
         </div>
       </Card>
 
-      <Btn onClick={profile?doUpdate:doSubmit} style={{width:"100%",justifyContent:"center",fontSize:15,padding:"14px"}}>
-        {profile?"Save changes →":"Submit profile →"}
+      <Btn onClick={profile?doUpdate:doSubmit} disabled={saving} data-loading-immediate="true" style={{width:"100%",justifyContent:"center",fontSize:15,padding:"14px",opacity:saving?0.7:1,cursor:saving?"default":"pointer"}}>
+        {saving?<><Icon name="loader-2" size={16} style={{animation:"spin 1s linear infinite"}}/>Saving...</>:(profile?"Save changes →":"Submit profile →")}
       </Btn>
     </div>
   );
@@ -2065,6 +2136,12 @@ Response timestamp: ${respondedAt}`
 
   return(
     <div style={{maxWidth:800,margin:"0 auto",paddingBottom:"4rem",fontFamily:FONT}}>
+
+      {justSaved&&(
+        <div style={{margin:"1rem 1.5rem 0",background:"#E7F7EE",border:"1px solid #34A853",borderRadius:10,padding:"10px 14px",display:"flex",alignItems:"center",gap:8,fontSize:13,fontWeight:600,color:"#1E7A3D"}}>
+          <Icon name="circle-check" size={16}/> Your profile changes have been saved.
+        </div>
+      )}
 
       {/* ── HERO HEADER ── */}
       <div style={{background:BRAND,padding:"2rem 2rem 0"}}>
@@ -2293,7 +2370,7 @@ Response timestamp: ${respondedAt}`
 // ── TALENT POOL ───────────────────────────────────────────────────────────────
 function PublicPage({onRequest,session,company,initialCandidates=[]}){
   const [candidates,setCandidates]=useState(()=>initialCandidates.filter(c=>c.consentPool&&c.shareActive));
-  const [filter,setFilter]=useState({location:"",industry:"",years:"",field:"",activelyExploring:""});
+  const [filter,setFilter]=useState({location:"",industry:"",years:"",field:"",activelyExploring:"",workingModel:"",contractType:""});
   const [search,setSearch]=useState("");
   const [selected,setSelected]=useState(null);
   const [showContactForm,setShowContactForm]=useState(false);
@@ -2307,11 +2384,13 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
 
   const q=search.trim().toLowerCase();
   const filtered=candidates.filter(c=>
-    (!filter.location||c.locations?.includes(filter.location))&&
+    (!filter.location||(filter.location==="Others"?(c.locations||[]).some(l=>!LOCATIONS.includes(l)):c.locations?.includes(filter.location)))&&
     (!filter.industry||(c.industries||[]).includes(filter.industry))&&
     (!filter.years||c.years===filter.years)&&
     (!filter.field||c.field===filter.field)&&
     (!filter.activelyExploring||c.activelyExploring===filter.activelyExploring)&&
+    (!filter.workingModel||(c.workingModel||[]).includes(filter.workingModel))&&
+    (!filter.contractType||c.contractType===filter.contractType)&&
     (!q||[c.code,c.position,c.field,c.skills,(c.industries||[]).join(" "),(c.locations||[]).join(" "),stripHtml(c.intro)].filter(Boolean).join(" ").toLowerCase().includes(q))
   );
 
@@ -2354,7 +2433,7 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
 
   // Filter bar helper - now handled by FilterPills component
 
-  const TABLE_COLS=["Code","Position","Field","Industry","Location","Experience","Languages","Skills","Salary","Summary","Exploring",""];
+  const TABLE_COLS=["Code","Position","Field","Industry","Location","Working Model","Contract","Experience","Languages","Skills","Salary","Summary","Exploring",""];
 
   return(
     <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
@@ -2370,14 +2449,16 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
       {/* Filters */}
       <Card style={{marginBottom:"1.5rem"}}>
         <SH icon="filter" title="Filters"/>
-        <FilterPills title="Location" options={LOCATIONS} value={filter.location} onChange={v=>setFilter(f=>({...f,location:v}))} inline={4}/>
+        <FilterPills title="Location" options={[...LOCATIONS,"Others"]} value={filter.location} onChange={v=>setFilter(f=>({...f,location:v}))} inline={4}/>
+        <FilterPills title="Working Model" options={WORKING_MODELS} value={filter.workingModel} onChange={v=>setFilter(f=>({...f,workingModel:v}))} inline={3}/>
+        <FilterPills title="Type of Contract" options={CONTRACT_TYPES} value={filter.contractType} onChange={v=>setFilter(f=>({...f,contractType:v}))} inline={3}/>
         <FilterPills title="Field" options={FIELDS} value={filter.field} onChange={v=>setFilter(f=>({...f,field:v}))} inline={6}/>
         <FilterPills title="Industry" options={INDUSTRIES} value={filter.industry} onChange={v=>setFilter(f=>({...f,industry:v}))} inline={5}/>
         <FilterPills title="Experience" options={YEARS_OPTS} value={filter.years} onChange={v=>setFilter(f=>({...f,years:v}))} inline={6}/>
         <FilterPills title="Actively Exploring" options={["Yes","No"]} value={filter.activelyExploring} onChange={v=>setFilter(f=>({...f,activelyExploring:v}))} inline={2}/>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
           <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}><strong>{filtered.length}</strong> candidate{filtered.length!==1?"s":""} found</p>
-          <button onClick={()=>setFilter({location:"",industry:"",years:"",field:"",activelyExploring:""})} style={{background:"none",border:"none",cursor:"pointer",fontSize:12,color:BRAND,fontFamily:FONT,fontWeight:600}}>Clear all filters</button>
+          <button onClick={()=>setFilter({location:"",industry:"",years:"",field:"",activelyExploring:"",workingModel:"",contractType:""})} style={{background:"none",border:"none",cursor:"pointer",fontSize:12,color:BRAND,fontFamily:FONT,fontWeight:600}}>Clear all filters</button>
         </div>
       </Card>
 
@@ -2397,6 +2478,8 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
                 <td style={{padding:"12px 14px",minWidth:100}}>{c.field&&<Badge color="purple">{c.field}</Badge>}</td>
                 <td style={{padding:"12px 14px",minWidth:130,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"var(--color-text-secondary)"}}>{(c.industries||[]).join(", ")}</td>
                 <td style={{padding:"12px 14px",whiteSpace:"nowrap"}}><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{(c.locations||[]).map(l=><Badge key={l} color="blue">{l}</Badge>)}</div></td>
+                <td style={{padding:"12px 14px",whiteSpace:"nowrap",color:"var(--color-text-secondary)"}}>{(c.workingModel||[]).join(", ")||"—"}</td>
+                <td style={{padding:"12px 14px",whiteSpace:"nowrap",color:"var(--color-text-secondary)"}}>{c.contractType||"—"}</td>
                 <td style={{padding:"12px 14px",whiteSpace:"nowrap",color:"var(--color-text-secondary)"}}>{c.years}</td>
                 <td style={{padding:"12px 14px",minWidth:120}}><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{(c.languages||[]).map(l=><span key={l.lang} style={{background:BRAND_LIGHT,color:BRAND,fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:99,whiteSpace:"nowrap"}}>{l.lang}{l.level?` · ${l.level}`:""}</span>)}</div></td>
                 <td style={{padding:"12px 14px",maxWidth:180,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"var(--color-text-secondary)"}}>{c.skills}</td>
@@ -2507,15 +2590,14 @@ function PostJobPage({onBack,onSuccess,company,session}){
   // based in a different office than HQ, or a different point of contact).
   const defaultContact=company?.contactPerson?`${company.contactPerson} — ${session?.email||""}`:(session?.email||"");
   const defaultLocations=company?.location?[company.location]:[];
-  const jobLocationOptions=company?.location&&!LOCATIONS.includes(company.location)?[...LOCATIONS,company.location]:LOCATIONS;
-  const blankForm=()=>({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:defaultLocations,industries:[],field:"",contact:defaultContact,deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))});
+  const blankForm=()=>({title:"",company:company?.name||"",summary:"",description:"",requirements:"",benefits:"",salary:"",locations:defaultLocations,workingModel:[],contractType:"",industries:[],field:"",contact:defaultContact,deadline:"",recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))});
   const [form,setForm]=useState(blankForm);
   const [errors,setErrors]=useState({});
   const [done,setDone]=useState(null);
   const [benefitsSaved,setBenefitsSaved]=useState(false);
   const [applyBenefitsToAll,setApplyBenefitsToAll]=useState(false);
+  const [posting,setPosting]=useState(false);
   const s=(k,v)=>setForm(f=>({...f,[k]:v}));
-  const tl=(l)=>setForm(f=>({...f,locations:f.locations.includes(l)?f.locations.filter(x=>x!==l):[...f.locations,l]}));
   const ti=(i)=>setForm(f=>({...f,industries:f.industries.includes(i)?f.industries.filter(x=>x!==i):[...f.industries,i]}));
 
   useEffect(()=>{
@@ -2551,9 +2633,12 @@ function PostJobPage({onBack,onSuccess,company,session}){
     if(!form.requirements.trim())e.requirements="Required";
 
     if(form.locations.length===0)e.locations="Select at least one";
+    if(!form.workingModel.length)e.workingModel="Select at least one";
+    if(!form.contractType)e.contractType="Required";
     if(form.industries.length===0)e.industries="Select at least one";
     if(!form.contact.trim())e.contact="Required";
     if(Object.keys(e).length){setErrors(e);return;}
+    setPosting(true);
     const code=gjid();
     const job={...form,code,companyCode:session?.code||null,companyEmail:session?.email||null,createdAt:new Date().toISOString(),status:"active",recruitmentProcess:form.recruitmentProcess?.length?form.recruitmentProcess:DEFAULT_RECRUITMENT_PROCESS.map(x=>({...x}))};
 
@@ -2571,6 +2656,7 @@ function PostJobPage({onBack,onSuccess,company,session}){
     }
     // Push notification
     await saveOne(SK.NOTIFS,{id:gid(),type:"job_posted",to:session?.email||"employer",message:`Job posted: ${form.title} at ${form.company}`,jobCode:code,company:form.company,title:form.title,createdAt:new Date().toISOString(),read:false},"id");
+    setPosting(false);
     setDone(code);onSuccess();
   };
 
@@ -2609,8 +2695,16 @@ function PostJobPage({onBack,onSuccess,company,session}){
           <F label="Application deadline"><input style={inp} type="date" value={form.deadline} onChange={e=>s("deadline",e.target.value)}/></F>
         </div>
         <F label="Location(s)" error={errors.locations} required>
-          <PillSel options={jobLocationOptions} selected={form.locations} onToggle={tl} error={errors.locations}/>
+          <MultiLocationPicker selected={form.locations} onChange={v=>s("locations",v)} error={errors.locations}/>
         </F>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}>
+          <F label="Working model (select all that apply)" error={errors.workingModel} required>
+            <PillSel options={WORKING_MODELS} selected={form.workingModel} onToggle={v=>s("workingModel",form.workingModel.includes(v)?form.workingModel.filter(x=>x!==v):[...form.workingModel,v])} error={errors.workingModel}/>
+          </F>
+          <F label="Type of contract" error={errors.contractType} required>
+            <SingleSelectPills options={CONTRACT_TYPES} value={form.contractType} onChange={v=>s("contractType",v)} error={errors.contractType}/>
+          </F>
+        </div>
         <F label="Industry (select all that apply)" error={errors.industries} required>
           <IndustryPicker selected={form.industries} onToggle={ti} error={errors.industries}/>
         </F>
@@ -2650,7 +2744,7 @@ function PostJobPage({onBack,onSuccess,company,session}){
 
       <Card><SH icon="git-merge" title="Recruitment Process"/><p style={{fontSize:13,color:"var(--color-text-secondary)",marginTop:0}}>Customize the process for this role. You can edit it later from the job detail page.</p>{form.recruitmentProcess.map((r,i)=><div key={r.name} style={{display:"grid",gridTemplateColumns:"160px 1fr",gap:10,alignItems:"start",padding:"10px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}><div style={{fontWeight:800,color:BRAND,paddingTop:8}}>{r.name}</div><textarea style={{...inp,minHeight:55}} value={r.description||""} onChange={e=>setForm(f=>({...f,recruitmentProcess:f.recruitmentProcess.map((x,idx)=>idx===i?{...x,description:e.target.value}:x)}))}/></div>)}</Card>
 
-      <Btn onClick={submit} style={{width:"100%",justifyContent:"center",fontSize:15,padding:"14px"}}>Post job →</Btn>
+      <Btn onClick={submit} disabled={posting} data-loading-immediate="true" style={{width:"100%",justifyContent:"center",fontSize:15,padding:"14px",opacity:posting?0.7:1}}>{posting?"Posting...":"Post job →"}</Btn>
     </div>
   );
 }
@@ -2659,7 +2753,7 @@ function PostJobPage({onBack,onSuccess,company,session}){
 function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApplications=[]}){
   const [jobs,setJobs]=useState(()=>initialJobs.filter(j=>j.status==="active"));
   const [companies,setCompanies]=useState(initialCompanies);
-  const [filter,setFilter]=useState({location:"",industry:"",years:"",field:""});
+  const [filter,setFilter]=useState({location:"",industry:"",years:"",field:"",workingModel:"",contractType:""});
   const [search,setSearch]=useState("");
   const [selected,setSelected]=useState(null);
   const [form,setForm]=useState({name:"",email:"",phone:"",cvLink:"",portfolio:"",salary:"",onboard:"",consent:false});
@@ -2697,10 +2791,12 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
 
   const filtered=jobs.filter(j=>{
     const q=search.trim().toLowerCase();
-    return (!filter.location||(j.locations||[]).includes(filter.location))&&
+    return (!filter.location||(filter.location==="Others"?(j.locations||[]).some(l=>!LOCATIONS.includes(l)):(j.locations||[]).includes(filter.location)))&&
     (!filter.industry||(j.industries||[]).includes(filter.industry))&&
     (!filter.years||j.years===filter.years)&&
     (!filter.field||j.field===filter.field)&&
+    (!filter.workingModel||(j.workingModel||[]).includes(filter.workingModel))&&
+    (!filter.contractType||j.contractType===filter.contractType)&&
     (!q||[j.code,j.title,j.company,j.field,(j.industries||[]).join(" "),(j.locations||[]).join(" "),j.summary,j.requirements].filter(Boolean).join(" ").toLowerCase().includes(q));
   });
 
@@ -2766,13 +2862,15 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
       </div>
       <Card style={{marginBottom:"1.5rem"}}>
         <SH icon="filter" title="Filters"/>
-        <FilterPills title="Location" options={LOCATIONS} value={filter.location} onChange={v=>setFilter(f=>({...f,location:v}))} inline={4}/>
+        <FilterPills title="Location" options={[...LOCATIONS,"Others"]} value={filter.location} onChange={v=>setFilter(f=>({...f,location:v}))} inline={4}/>
+        <FilterPills title="Working Model" options={WORKING_MODELS} value={filter.workingModel} onChange={v=>setFilter(f=>({...f,workingModel:v}))} inline={3}/>
+        <FilterPills title="Type of Contract" options={CONTRACT_TYPES} value={filter.contractType} onChange={v=>setFilter(f=>({...f,contractType:v}))} inline={3}/>
         <FilterPills title="Field" options={FIELDS} value={filter.field} onChange={v=>setFilter(f=>({...f,field:v}))} inline={6}/>
         <FilterPills title="Industry" options={INDUSTRIES} value={filter.industry} onChange={v=>setFilter(f=>({...f,industry:v}))} inline={5}/>
         <FilterPills title="Experience" options={YEARS_OPTS} value={filter.years} onChange={v=>setFilter(f=>({...f,years:v}))} inline={6}/>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:4,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)"}}>
           <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}><strong>{filtered.length}</strong> job{filtered.length!==1?"s":""} found</p>
-          <button onClick={()=>setFilter({location:"",industry:"",years:"",field:""})} style={{background:"none",border:"none",cursor:"pointer",fontSize:12,color:BRAND,fontFamily:FONT,fontWeight:600}}>Clear all filters</button>
+          <button onClick={()=>setFilter({location:"",industry:"",years:"",field:"",workingModel:"",contractType:""})} style={{background:"none",border:"none",cursor:"pointer",fontSize:12,color:BRAND,fontFamily:FONT,fontWeight:600}}>Clear all filters</button>
         </div>
       </Card>
       <div style={{display:"flex",flexDirection:"column",gap:10}}>
@@ -2783,7 +2881,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
                 <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:5}}><Badge color="blue">{j.field||"Job"}</Badge><span style={{fontFamily:"monospace",fontSize:11,color:BRAND_DIM}}>{j.code}</span></div>
                 <h2 style={{fontSize:18,fontWeight:800,color:BRAND,margin:"0 0 5px"}}>{j.title}</h2>
                 <p style={{fontSize:13,fontWeight:600,margin:"0 0 8px"}}>{j.company}</p>
-                <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}>{(j.locations||[]).join(" · ")} · {(j.industries||[]).join(", ")}{j.salary?` · ${j.salary}`:""}</p>
+                <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}>{(j.locations||[]).join(" · ")}{(j.workingModel||[]).length?` · ${j.workingModel.join(", ")}`:""}{j.contractType?` · ${j.contractType}`:""} · {(j.industries||[]).join(", ")}{j.salary?` · ${j.salary}`:""}</p>
               </div>
               <div style={{display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
                 {appliedCodes.has(j.code)&&<Badge color="green">Applied</Badge>}
@@ -2799,7 +2897,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
       {selected&&<div style={{position:"fixed",inset:0,background:"rgba(0,30,80,0.45)",display:"flex",alignItems:"flex-start",justifyContent:"center",zIndex:300,padding:"2rem 1rem",overflowY:"auto"}}>
         <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:1000,padding:"2rem",fontFamily:FONT}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"1.5rem"}}>
-            <div><Badge color="blue">{selected.field||"Job"}</Badge><h2 style={{fontSize:24,fontWeight:800,color:BRAND,margin:"8px 0 4px"}}>{selected.title}</h2><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{selected.company} · {(selected.locations||[]).join(", ")}</p></div>
+            <div><Badge color="blue">{selected.field||"Job"}</Badge><h2 style={{fontSize:24,fontWeight:800,color:BRAND,margin:"8px 0 4px"}}>{selected.title}</h2><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{selected.company} · {(selected.locations||[]).join(", ")}{(selected.workingModel||[]).length?` · ${selected.workingModel.join(", ")}`:""}{selected.contractType?` · ${selected.contractType}`:""}</p></div>
             <button onClick={()=>setSelected(null)} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",fontSize:16,color:BRAND,width:32,height:32,borderRadius:"50%"}}>✕</button>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 280px",gap:"1.5rem",alignItems:"start"}}>
@@ -3239,10 +3337,12 @@ function RichTextEditor({value,onChange,minHeight=140}){
 
 function JobEditPanel({job,onSave}){
   const [form,setForm]=useState({...job,recruitmentProcess:(job.recruitmentProcess||DEFAULT_RECRUITMENT_PROCESS).map(x=>({...x}))});
+  const [saving,setSaving]=useState(false);
   const s=(k,v)=>setForm(f=>({...f,[k]:v}));
   const updateRound=(i,k,v)=>setForm(f=>({...f,recruitmentProcess:f.recruitmentProcess.map((r,idx)=>idx===i?{...r,[k]:v}:r)}));
   const addRound=()=>setForm(f=>({...f,recruitmentProcess:[...f.recruitmentProcess,{name:"New stage",description:""}]}));
   const removeRound=i=>setForm(f=>({...f,recruitmentProcess:f.recruitmentProcess.filter((_,idx)=>idx!==i)}));
+  const doSave=async()=>{setSaving(true);await onSave(form);setSaving(false);};
   return <div>
     <Card><SH icon="file-description" title="Edit Job Description"/>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 1rem"}}><F label="Job title"><input style={inp} value={form.title||""} onChange={e=>s("title",e.target.value)}/></F><F label="Company"><input style={inp} value={form.company||""} onChange={e=>s("company",e.target.value)}/></F></div>
@@ -3260,7 +3360,7 @@ function JobEditPanel({job,onSave}){
       </div>)}
       <Btn variant="outline" onClick={addRound} style={{marginTop:12}}><Icon name="plus" size={14}/>Add stage</Btn>
     </Card>
-    <Btn onClick={()=>onSave(form)} style={{width:"100%",justifyContent:"center",padding:"13px"}}>Save changes</Btn>
+    <Btn onClick={doSave} disabled={saving} data-loading-immediate="true" style={{width:"100%",justifyContent:"center",padding:"13px",opacity:saving?0.7:1}}>{saving?"Saving...":"Save changes"}</Btn>
   </div>;
 }
 
