@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-14-url-routing";
+const APP_BUILD="2026-08-14-url-routing-deeplinks";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -182,18 +182,23 @@ function parseRoute(){
   if(typeof window==="undefined")return{page:null,sub:""};
   const hash=window.location.hash||"";
   if(isAdminHash(hash)){
-    const sub=hash.replace(/^#\/?admin\/?/,"");
-    return{page:"admin",sub};
+    const rest=hash.replace(/^#\/?admin\/?/,"");
+    return{page:"admin",sub:rest?decodeURIComponent(rest):""};
   }
   const raw=hash.replace(/^#\/?/,"");
-  const[first,...rest]=raw.split("/");
-  return{page:ROUTE_TO_PAGE[first]||null,sub:rest.join("/")};
+  const slashIdx=raw.indexOf("/");
+  const first=slashIdx===-1?raw:raw.slice(0,slashIdx);
+  const restRaw=slashIdx===-1?"":raw.slice(slashIdx+1);
+  return{page:ROUTE_TO_PAGE[first]||null,sub:restRaw?decodeURIComponent(restRaw):""};
 }
 
 function buildHash(pageKey,sub){
-  if(pageKey==="admin")return "#/admin"+(sub?"/"+sub:"");
+  // Candidate codes look like "#PU0001" — encode the sub segment so a literal
+  // "#" (or any other special character) inside it can't be misread as
+  // starting a second fragment or otherwise mangling the URL.
+  if(pageKey==="admin")return "#/admin"+(sub?"/"+encodeURIComponent(sub):"");
   const base=PAGE_ROUTES[pageKey];
-  return base?("#/"+base+(sub?"/"+sub:"")):null;
+  return base?("#/"+base+(sub?"/"+encodeURIComponent(sub):"")):null;
 }
 
 function applyRoute(pageKey,sub,replace){
@@ -2428,7 +2433,7 @@ Response timestamp: ${respondedAt}`
 }
 
 // ── TALENT POOL ───────────────────────────────────────────────────────────────
-function PublicPage({onRequest,session,company,initialCandidates=[]}){
+function PublicPage({onRequest,session,company,initialCandidates=[],initialSelectedCode=""}){
   const [candidates,setCandidates]=useState(()=>initialCandidates.filter(c=>c.consentPool&&c.shareActive));
   const [filter,setFilter]=useState({location:"",industry:"",years:"",field:"",activelyExploring:"",workingModel:"",contractType:""});
   const [search,setSearch]=useState("");
@@ -2439,8 +2444,31 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
   const [reqSent,setReqSent]=useState(false);
   const [isSendingRequest,setIsSendingRequest]=useState(false);
   const rfset=(k,v)=>setReqForm(f=>({...f,[k]:v}));
+  const triedAutoOpen=useRef(false);
 
   useEffect(()=>{ld(SK.CANDIDATES,true).then(d=>setCandidates((d||[]).filter(c=>c.consentPool&&c.shareActive)));},[]);
+
+  // Deep link support: "#/talent-pool/<code>" opens that candidate directly
+  // once their data is available, instead of only ever landing on the list.
+  useEffect(()=>{
+    if(triedAutoOpen.current||!initialSelectedCode||!candidates.length)return;
+    const match=candidates.find(c=>c.code===initialSelectedCode);
+    if(match){triedAutoOpen.current=true;openCandidate(match);}
+  },[candidates]);
+
+  // Browser Back/Forward while a candidate is open: close/switch to match the
+  // URL, rather than leaving a stale modal open after the address bar moved on.
+  useEffect(()=>{
+    const onPop=()=>{
+      const route=parseRoute();
+      if(route.page!=="public")return;
+      if(!route.sub){setSelected(null);setShowContactForm(false);return;}
+      const match=candidates.find(c=>c.code===route.sub);
+      if(match)setSelected(match);
+    };
+    window.addEventListener("popstate",onPop);
+    return ()=>window.removeEventListener("popstate",onPop);
+  },[candidates]);
 
   const q=search.trim().toLowerCase();
   const filtered=candidates.filter(c=>
@@ -2457,7 +2485,9 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
   const openCandidate=(c)=>{
     setSelected(c);setShowContactForm(false);
     setReqSent(false);setReqForm({company:company?.name||"",contactName:company?.contactPerson||"",contactEmail:session?.email||"",contactPhone:"",title:"",jd:"",salary:"",benefits:""});setReqErrors({});
+    pushRoute("public",c.code);
   };
+  const closeCandidate=()=>{setSelected(null);setShowContactForm(false);replaceRoute("public","");};
 
   const sendRequest=async()=>{
     if(isSendingRequest)return;
@@ -2571,7 +2601,7 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
                     <span>·</span><span>{selected.years}</span>
                   </p>
                 </div>
-                <button onClick={()=>setSelected(null)} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",fontSize:16,color:BRAND,width:32,height:32,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,flexShrink:0}}>✕</button>
+                <button onClick={closeCandidate} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",fontSize:16,color:BRAND,width:32,height:32,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,flexShrink:0}}>✕</button>
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px 24px",marginBottom:"1rem"}}>
                 <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 5px"}}>Location</p><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{(selected.locations||[]).map(l=><Badge key={l} color="blue">{l}</Badge>)}</div></div>
@@ -2601,14 +2631,14 @@ function PublicPage({onRequest,session,company,initialCandidates=[]}){
                 <h2 style={{fontSize:18,fontWeight:800,margin:"0 0 4px",color:BRAND}}>Send Contact Request</h2>
                 <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0}}>To candidate: <strong style={{fontFamily:"monospace",color:BRAND}}>{selected.code}</strong></p>
               </div>
-              <button onClick={()=>{setShowContactForm(false);setSelected(null);}} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",fontSize:16,color:BRAND,width:32,height:32,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,flexShrink:0}}>✕</button>
+              <button onClick={closeCandidate} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",fontSize:16,color:BRAND,width:32,height:32,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,flexShrink:0}}>✕</button>
             </div>
             {reqSent?(
               <div style={{textAlign:"center",padding:"2rem",background:BRAND_LIGHT,borderRadius:14}}>
                 <Icon name="check-circle" size={36} style={{color:BRAND}}/>
                 <p style={{fontWeight:800,marginTop:8,fontSize:16,color:BRAND}}>Request sent!</p>
                 <p style={{fontSize:13,color:"var(--color-text-secondary)"}}>The candidate will be notified and will respond to your request.</p>
-                <Btn onClick={()=>{setShowContactForm(false);setSelected(null);}} style={{marginTop:12}}>Close</Btn>
+                <Btn onClick={closeCandidate} style={{marginTop:12}}>Close</Btn>
               </div>
             ):(
               <>
@@ -2810,7 +2840,7 @@ function PostJobPage({onBack,onSuccess,company,session}){
 }
 
 // ── JOBS ───────────────────────────────────────────────────────────────────────
-function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApplications=[]}){
+function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApplications=[],initialSelectedCode=""}){
   const [jobs,setJobs]=useState(()=>initialJobs.filter(j=>j.status==="active"));
   const [companies,setCompanies]=useState(initialCompanies);
   const [filter,setFilter]=useState({location:"",industry:"",years:"",field:"",workingModel:"",contractType:""});
@@ -2823,6 +2853,28 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   const [isApplying,setIsApplying]=useState(false);
   const [appliedCodes,setAppliedCodes]=useState(()=>new Set(initialApplications.filter(a=>a.candidateCode===session.code||(a.email&&a.email.toLowerCase()===session.email.toLowerCase())).map(a=>a.jobCode)));
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const triedAutoOpen=useRef(false);
+
+  // Deep link support: "#/jobs/<code>" opens that job directly once the list
+  // is loaded, instead of only ever landing on the browse list.
+  useEffect(()=>{
+    if(triedAutoOpen.current||!initialSelectedCode||!jobs.length)return;
+    const match=jobs.find(j=>j.code===initialSelectedCode);
+    if(match){triedAutoOpen.current=true;openJob(match);}
+  },[jobs]);
+
+  // Browser Back/Forward while a job is open: close/switch to match the URL.
+  useEffect(()=>{
+    const onPop=()=>{
+      const route=parseRoute();
+      if(route.page!=="jobs")return;
+      if(!route.sub){setSelected(null);return;}
+      const match=jobs.find(j=>j.code===route.sub);
+      if(match)setSelected(match);
+    };
+    window.addEventListener("popstate",onPop);
+    return ()=>window.removeEventListener("popstate",onPop);
+  },[jobs]);
 
   const load=async()=>{
     const {d,co}=await ldMany({d:SK.JOBS,co:SK.COMPANIES});
@@ -2862,6 +2914,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
 
   const openJob=async(j)=>{
     setSelected(j);setSubmitted(false);setErrors({});
+    pushRoute("jobs",j.code);
     if(session.role!=="jobseeker")return;
     // "Already applied?" is answered from the appliedCodes state (kept in
     // sync on mount and right after a successful apply) instead of fetching
@@ -2876,6 +2929,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
       onboard:profile?.onboard||"",consent:false
     });
   };
+  const closeJob=()=>{setSelected(null);replaceRoute("jobs","");};
 
   const apply=async()=>{
     if(alreadyApplied||isApplying)return;
@@ -2958,7 +3012,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
         <div style={{background:"#fff",borderRadius:20,width:"100%",maxWidth:1000,padding:"2rem",fontFamily:FONT}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"1.5rem"}}>
             <div><Badge color="blue">{selected.field||"Job"}</Badge><h2 style={{fontSize:24,fontWeight:800,color:BRAND,margin:"8px 0 4px"}}>{selected.title}</h2><p style={{fontSize:13,color:"var(--color-text-secondary)",margin:0}}>{selected.company} · {(selected.locations||[]).join(", ")}{asArr(selected.workingModel).length?` · ${asArr(selected.workingModel).join(", ")}`:""}{selected.contractType?` · ${selected.contractType}`:""}</p></div>
-            <button onClick={()=>setSelected(null)} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",fontSize:16,color:BRAND,width:32,height:32,borderRadius:"50%"}}>✕</button>
+            <button onClick={closeJob} style={{background:BRAND_LIGHT,border:"none",cursor:"pointer",fontSize:16,color:BRAND,width:32,height:32,borderRadius:"50%"}}>✕</button>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 280px",gap:"1.5rem",alignItems:"start"}}>
             <div>
@@ -3699,8 +3753,8 @@ function App(){
       <Nav page={page} onNavigate={navigateMenu} notifCount={notifCount} role={role} onLogout={logout} onDeleteAccount={deleteAccount} onOpenSync={()=>setShowSync(true)} showSync={isAdmin} onOpenNotifs={openNotifs}/>
       <PageErrorBoundary key={page}>
         {page==="candidate"&&role==="jobseeker"&&<CandidatePage onSubmit={bump} refresh={refresh} session={session} initialTab={initialRouteRef.current.page==="candidate"?Object.keys(CANDIDATE_SUBTABS).find(k=>CANDIDATE_SUBTABS[k]===initialRouteRef.current.sub):undefined}/>}
-        {page==="public"&&<PublicPage onRequest={bump} session={session} company={company} initialCandidates={navigationData?.destination==="public"?navigationData.candidates:[]}/>}
-        {page==="jobs"&&<JobsPage onApply={bump} session={session} initialJobs={navigationData?.destination==="jobs"?navigationData.jobs:[]} initialCompanies={navigationData?.destination==="jobs"?navigationData.companies:[]} initialApplications={navigationData?.destination==="jobs"?navigationData.applications:[]}/>}
+        {page==="public"&&<PublicPage onRequest={bump} session={session} company={company} initialCandidates={navigationData?.destination==="public"?navigationData.candidates:[]} initialSelectedCode={initialRouteRef.current.page==="public"?initialRouteRef.current.sub:""}/>}
+        {page==="jobs"&&<JobsPage onApply={bump} session={session} initialJobs={navigationData?.destination==="jobs"?navigationData.jobs:[]} initialCompanies={navigationData?.destination==="jobs"?navigationData.companies:[]} initialApplications={navigationData?.destination==="jobs"?navigationData.applications:[]} initialSelectedCode={initialRouteRef.current.page==="jobs"?initialRouteRef.current.sub:""}/>}
         {page==="employer"&&role==="employer"&&<EmployerPage onPost={bump} refresh={refresh} session={session} company={company} onCompanyUpdated={setCompany} initialTab={initialRouteRef.current.page==="employer"?Object.keys(EMPLOYER_SUBTABS).find(k=>EMPLOYER_SUBTABS[k]===initialRouteRef.current.sub):undefined}/>}
         {page==="notifications"&&<NotificationsPage onRefresh={bump} role={role} session={session} onBack={()=>{setPage(prevPage);pushRoute(prevPage);}}/>}
       </PageErrorBoundary>
