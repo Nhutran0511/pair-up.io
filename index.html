@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-18-candidate-modal-wide";
+const APP_BUILD="2026-08-18-candidate-modal-fields";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -2619,6 +2619,8 @@ function PublicPage({onRequest,session,company,initialCandidates=[],initialSelec
                     <SH icon="user-circle" title="Candidate Details"/>
                     <div style={{display:"flex",flexDirection:"column",gap:14}}>
                       <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 5px"}}>Location</p><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{(selected.locations||[]).map(l=><Badge key={l} color="blue">{l}</Badge>)}</div></div>
+                      <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 5px"}}>Working Model</p>{asArr(selected.workingModel).length?<div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{asArr(selected.workingModel).map(w=><Badge key={w} color="blue">{w}</Badge>)}</div>:<p style={{fontSize:13,margin:0}}>—</p>}</div>
+                      <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 3px"}}>Type of Contract</p><p style={{fontSize:13,margin:0}}>{selected.contractType||"—"}</p></div>
                       <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 3px"}}>Salary Expectation</p><p style={{fontSize:13,fontWeight:700,color:BRAND,margin:0}}>{selected.salary||"—"}</p></div>
                       <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 5px"}}>Languages</p><div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{(selected.languages||[]).map(l=><span key={l.lang} style={{background:BRAND_LIGHT,color:BRAND,fontSize:11,fontWeight:600,padding:"3px 9px",borderRadius:99}}>{l.lang} · {l.level}</span>)}</div></div>
                       <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 3px"}}>Available</p><p style={{fontSize:13,margin:0}}>{selected.onboard||"—"}</p></div>
