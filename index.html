@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-14-fix-talentpool-blankpage";
+const APP_BUILD="2026-08-14-url-routing";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -160,6 +160,52 @@ function stripHtml(html){if(!html)return"";return html.replace(/<[^>]*>/g," ").r
 // string — which took down the whole page (blank screen, no error boundary)
 // for Talent Pool/Jobs whenever an older record was in the list.
 function asArr(v){return Array.isArray(v)?v:(v?[v]:[]);}
+
+// ── URL routing ─────────────────────────────────────────────────────────
+// Reflects the current section in the address bar (hash-based, since this is
+// a static single HTML file on GitHub Pages with no server-side routing to
+// fall unknown paths back to index.html — a hash never gets sent to the
+// server at all, so it always just re-loads this same file and JS decides
+// what to show). Copying the URL and opening it in a new tab, or bookmarking
+// it, now lands directly on that section instead of always the default page.
+const PAGE_ROUTES={candidate:"profile",public:"talent-pool",jobs:"jobs",employer:"employer",notifications:"notifications"};
+const ROUTE_TO_PAGE=Object.fromEntries(Object.entries(PAGE_ROUTES).map(([k,v])=>[v,k]));
+const CANDIDATE_SUBTABS={info:"",requests:"requests",applied:"applied"};
+const EMPLOYER_SUBTABS={employer:"",requests:"requests",candidates:"candidates",company:"company"};
+const ADMIN_SUBTABS={dashboard:"",candidates:"candidates",jobs:"jobs",companies:"companies"};
+
+// True for "#admin", "#/admin", and "#/admin/..." — kept liberal so an old
+// bookmarked/shared "#admin" link (the original scheme) still works.
+function isAdminHash(hash){ return /^#\/?admin(\/|$)/.test(hash||""); }
+
+function parseRoute(){
+  if(typeof window==="undefined")return{page:null,sub:""};
+  const hash=window.location.hash||"";
+  if(isAdminHash(hash)){
+    const sub=hash.replace(/^#\/?admin\/?/,"");
+    return{page:"admin",sub};
+  }
+  const raw=hash.replace(/^#\/?/,"");
+  const[first,...rest]=raw.split("/");
+  return{page:ROUTE_TO_PAGE[first]||null,sub:rest.join("/")};
+}
+
+function buildHash(pageKey,sub){
+  if(pageKey==="admin")return "#/admin"+(sub?"/"+sub:"");
+  const base=PAGE_ROUTES[pageKey];
+  return base?("#/"+base+(sub?"/"+sub:"")):null;
+}
+
+function applyRoute(pageKey,sub,replace){
+  if(typeof window==="undefined")return;
+  const hash=buildHash(pageKey,sub);
+  if(!hash||window.location.hash===hash)return;
+  const url=window.location.pathname+window.location.search+hash;
+  if(replace)window.history.replaceState(null,"",url);
+  else window.history.pushState(null,"",url);
+}
+const pushRoute=(pageKey,sub="")=>applyRoute(pageKey,sub,false);
+const replaceRoute=(pageKey,sub="")=>applyRoute(pageKey,sub,true);
 
 // ── GOOGLE SHEETS SYNC ────────────────────────────────────────────────────────
 // Static pages can't write to a private Google Sheet directly; a small Google Apps
@@ -1510,7 +1556,10 @@ function AdminGate(){
 
 // ── ADMIN (talent pool & jobs moderation, #admin only) ────────────────────────
 function AdminPage(){
-  const [tab,setTab]=useState("dashboard");
+  const [tab,setTab]=useState(()=>{
+    const r=parseRoute();
+    return r.page==="admin"?(Object.keys(ADMIN_SUBTABS).find(k=>ADMIN_SUBTABS[k]===r.sub)||"dashboard"):"dashboard";
+  });
   const [candidates,setCandidates]=useState([]);
   const [jobs,setJobs]=useState([]);
   const [companies,setCompanies]=useState([]);
@@ -1530,6 +1579,7 @@ function AdminPage(){
     setLoading(false);
   };
   useEffect(()=>{load();},[]);
+  useEffect(()=>{ replaceRoute("admin",ADMIN_SUBTABS[tab]||""); },[]);
 
   const selectAdminTab=async destination=>{
     if(destination===tab)return;
@@ -1553,6 +1603,7 @@ function AdminPage(){
         setCompanies(freshCompanies||[]);
       }
       setTab(destination);
+      pushRoute("admin",ADMIN_SUBTABS[destination]||"");
       await waitForReactCommit();
     }finally{
       finishGlobalLoadingOperation();
@@ -1815,6 +1866,7 @@ function CandidatePage({onSubmit,refresh,session,initialTab}){
   const [profileEvents,setProfileEvents]=useState([]);
   const [saving,setSaving]=useState(false);
   const [justSaved,setJustSaved]=useState(false);
+  useEffect(()=>{ replaceRoute("candidate",CANDIDATE_SUBTABS[tab]||""); },[tab]);
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
 
   // Load profile from storage once. The per-browser LKEY cache is just a fast
@@ -2947,19 +2999,20 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
 }
 
 // ── EMPLOYER ──────────────────────────────────────────────────────────────────
-function EmployerPage({onPost,refresh,session,company,onCompanyUpdated}){
+function EmployerPage({onPost,refresh,session,company,onCompanyUpdated,initialTab}){
   const [postingJob,setPostingJob]=useState(false);
   const [jobsAll,setJobsAll]=useState([]);
   const [requestsAll,setRequestsAll]=useState([]);
   const [applications,setApplications]=useState([]);
   const [candidates,setCandidates]=useState([]);
-  const [tab,setTab]=useState("employer");
+  const [tab,setTab]=useState(initialTab||"employer");
   const [selectedJob,setSelectedJob]=useState(null);
   const [viewingC,setViewingC]=useState(null);
   const [jobView,setJobView]=useState("pipeline");
   const [selectedRound,setSelectedRound]=useState("Applied");
   const [selectedApp,setSelectedApp]=useState(null);
   const [viewingRequest,setViewingRequest]=useState(null);
+  useEffect(()=>{ replaceRoute("employer",EMPLOYER_SUBTABS[tab]||""); },[tab]);
 
   const load=async()=>{
     const{jobsD,reqD,appsD,candD}=await ldMany({jobsD:SK.JOBS,reqD:SK.REQUESTS,appsD:SK.APPLICATIONS,candD:SK.CANDIDATES});
@@ -3427,7 +3480,13 @@ function NotificationsPage({onRefresh,role,session,onBack}){
 
 // ── APP ───────────────────────────────────────────────────────────────────────
 function App(){
-  const [role,setRole]=useState(null);
+  const initialRouteRef=useRef(parseRoute());
+  const [role,setRole]=useState(()=>{
+    const r=initialRouteRef.current;
+    if(r.page==="candidate")return "jobseeker";
+    if(r.page==="employer")return "employer";
+    return null;
+  });
   const [session,setSession]=useState(null);
   const [company,setCompany]=useState(null);   // employer's company profile, or undefined until checked
   const [companyChecked,setCompanyChecked]=useState(false);
@@ -3439,7 +3498,7 @@ function App(){
   const [showSync,setShowSync]=useState(false);
   const [navigationData,setNavigationData]=useState(null);
   const menuNavigationId=useRef(0);
-  const isAdmin=typeof window!=="undefined"&&window.location.hash==="#admin";
+  const isAdmin=typeof window!=="undefined"&&isAdminHash(window.location.hash);
   const bump=useCallback(()=>setRefresh(r=>r+1),[]);
 
   // Count one visit for this full document load. SPA navigation does not remount App.
@@ -3455,7 +3514,12 @@ function App(){
       }
       if(s){
         setRole(s.role);setSession(s);
-        setPage(s.role==="jobseeker"?"candidate":"employer");
+        const route=initialRouteRef.current;
+        const allowedPages={notifications:true,public:true,jobs:true,candidate:s.role==="jobseeker",employer:s.role==="employer"};
+        const defaultPage=s.role==="jobseeker"?"candidate":"employer";
+        const initialPage=(route.page&&route.page!=="admin"&&allowedPages[route.page])?route.page:defaultPage;
+        setPage(initialPage);
+        replaceRoute(initialPage,initialPage===route.page?route.sub:"");
         // Warm the cache in the background (not awaited) so the first page the
         // person actually lands on often finds its data already cached.
         const prefetchSheets=s.role==="jobseeker"
@@ -3466,6 +3530,23 @@ function App(){
       setBooting(false);
     })();
   },[]);
+
+  // Browser Back/Forward: keep in-app page state in sync with the URL so the
+  // history entries pushRoute() creates are actually navigable, not just
+  // decorative. Deep-linking into a page you don't have access to (wrong
+  // role, or not logged in) is intentionally ignored here — the effect above
+  // already resolved that once at boot, and this only reacts to real
+  // back/forward, not to that initial resolution.
+  useEffect(()=>{
+    const onPopState=()=>{
+      const route=parseRoute();
+      if(!role||!route.page||route.page==="admin")return;
+      const allowedPages={notifications:true,public:true,jobs:true,candidate:role==="jobseeker",employer:role==="employer"};
+      if(allowedPages[route.page])setPage(route.page);
+    };
+    window.addEventListener("popstate",onPopState);
+    return ()=>window.removeEventListener("popstate",onPopState);
+  },[role]);
 
   // Check / load company profile when an employer session starts. Deliberately
   // does NOT depend on `refresh`: bump() fires after routine actions like
@@ -3537,13 +3618,14 @@ function App(){
       if(navigationId!==menuNavigationId.current)return;
       setNavigationData(nextData);
       setPage(destination);
+      pushRoute(destination);
       await waitForReactCommit();
     }finally{
       finishGlobalLoadingOperation();
     }
   },[page,role]);
 
-  const openNotifs=()=>{ if(page!=="notifications"){ setPrevPage(page); setPage("notifications"); } };
+  const openNotifs=()=>{ if(page!=="notifications"){ setPrevPage(page); setPage("notifications"); pushRoute("notifications"); } };
 
   const clearSession=async()=>{
     await sd(SK.SESSION,null,true);
@@ -3584,7 +3666,15 @@ function App(){
 
   if(!role)return <RoleSelection onSelect={r=>setRole(r)}/>;
 
-  if(!session)return <AuthPage role={role} onBack={()=>setRole(null)} onAuthed={s=>{setSession(s);setPage(s.role==="jobseeker"?"candidate":"employer");}}/>;
+  if(!session)return <AuthPage role={role} onBack={()=>setRole(null)} onAuthed={s=>{
+    setSession(s);
+    const route=initialRouteRef.current;
+    const allowedPages={notifications:true,public:true,jobs:true,candidate:s.role==="jobseeker",employer:s.role==="employer"};
+    const defaultPage=s.role==="jobseeker"?"candidate":"employer";
+    const initialPage=(route.page&&route.page!=="admin"&&allowedPages[route.page])?route.page:defaultPage;
+    setPage(initialPage);
+    replaceRoute(initialPage,initialPage===route.page?route.sub:"");
+  }}/>;
 
   if(session.role==="employer"&&!companyChecked)return(
     <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:14,background:"var(--color-background-tertiary)",fontFamily:FONT}}>
@@ -3608,11 +3698,11 @@ function App(){
       `}</style>
       <Nav page={page} onNavigate={navigateMenu} notifCount={notifCount} role={role} onLogout={logout} onDeleteAccount={deleteAccount} onOpenSync={()=>setShowSync(true)} showSync={isAdmin} onOpenNotifs={openNotifs}/>
       <PageErrorBoundary key={page}>
-        {page==="candidate"&&role==="jobseeker"&&<CandidatePage onSubmit={bump} refresh={refresh} session={session}/>}
+        {page==="candidate"&&role==="jobseeker"&&<CandidatePage onSubmit={bump} refresh={refresh} session={session} initialTab={initialRouteRef.current.page==="candidate"?Object.keys(CANDIDATE_SUBTABS).find(k=>CANDIDATE_SUBTABS[k]===initialRouteRef.current.sub):undefined}/>}
         {page==="public"&&<PublicPage onRequest={bump} session={session} company={company} initialCandidates={navigationData?.destination==="public"?navigationData.candidates:[]}/>}
         {page==="jobs"&&<JobsPage onApply={bump} session={session} initialJobs={navigationData?.destination==="jobs"?navigationData.jobs:[]} initialCompanies={navigationData?.destination==="jobs"?navigationData.companies:[]} initialApplications={navigationData?.destination==="jobs"?navigationData.applications:[]}/>}
-        {page==="employer"&&role==="employer"&&<EmployerPage onPost={bump} refresh={refresh} session={session} company={company} onCompanyUpdated={setCompany}/>}
-        {page==="notifications"&&<NotificationsPage onRefresh={bump} role={role} session={session} onBack={()=>setPage(prevPage)}/>}
+        {page==="employer"&&role==="employer"&&<EmployerPage onPost={bump} refresh={refresh} session={session} company={company} onCompanyUpdated={setCompany} initialTab={initialRouteRef.current.page==="employer"?Object.keys(EMPLOYER_SUBTABS).find(k=>EMPLOYER_SUBTABS[k]===initialRouteRef.current.sub):undefined}/>}
+        {page==="notifications"&&<NotificationsPage onRefresh={bump} role={role} session={session} onBack={()=>{setPage(prevPage);pushRoute(prevPage);}}/>}
       </PageErrorBoundary>
       {showSync&&<SyncSettingsModal onClose={()=>setShowSync(false)}/>}
     </div>
