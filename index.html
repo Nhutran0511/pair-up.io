@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-18-candidate-modal-fields";
+const APP_BUILD="2026-08-18-public-guest-browse";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -1015,6 +1015,26 @@ function AdModal({onDone}){
 }
 
 // ── NAV ───────────────────────────────────────────────────────────────────────
+// Simplified nav for anonymous visitors browsing public content (Talent Pool
+// / Jobs) without being signed in — no My Profile/Employer/notifications
+// (those need an account), just the two public sections plus a Sign in button.
+function GuestNav({page,onNavigate,onSignIn}){
+  const tabs=[{id:"public",label:"Talent Pool",icon:"users"},{id:"jobs",label:"Jobs",icon:"briefcase"}];
+  return(
+    <nav style={{background:BRAND,padding:"0 2rem",display:"flex",alignItems:"center",position:"sticky",top:0,zIndex:100,fontFamily:FONT}}>
+      <div style={{color:"#fff",fontWeight:800,fontSize:28,letterSpacing:-1.5,marginRight:"2rem",paddingRight:"2rem",borderRight:"1px solid rgba(255,255,255,0.18)",paddingTop:14,paddingBottom:14,whiteSpace:"nowrap"}}>
+        <span style={{opacity:0.45,fontWeight:400}}>pair</span><span style={{fontWeight:800}}>up</span>
+      </div>
+      {tabs.map(t=>(
+        <button key={t.id} onClick={()=>onNavigate(t.id)} style={{background:"none",border:"none",cursor:"pointer",color:page===t.id?"#fff":"rgba(255,255,255,0.58)",fontWeight:page===t.id?700:400,fontSize:13,padding:"16px 14px",borderBottom:page===t.id?"2px solid #7BA7F5":"2px solid transparent",display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap",fontFamily:FONT}}>
+          <Icon name={t.icon} size={15}/>{t.label}
+        </button>
+      ))}
+      <button onClick={onSignIn} style={{marginLeft:"auto",background:"#fff",color:BRAND,border:"none",padding:"9px 18px",borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:700,fontFamily:FONT}}>Sign in</button>
+    </nav>
+  );
+}
+
 function Nav({page,onNavigate,notifCount,role,onLogout,onDeleteAccount,onOpenSync,showSync,onOpenNotifs}){
   const tabs=role==="jobseeker"
     ?[{id:"candidate",label:"My Profile",icon:"user"},{id:"public",label:"Talent Pool",icon:"users"},{id:"jobs",label:"Jobs",icon:"briefcase"}]
@@ -2433,7 +2453,7 @@ Response timestamp: ${respondedAt}`
 }
 
 // ── TALENT POOL ───────────────────────────────────────────────────────────────
-function PublicPage({onRequest,session,company,initialCandidates=[],initialSelectedCode=""}){
+function PublicPage({onRequest,session,company,initialCandidates=[],initialSelectedCode="",onNeedSignIn}){
   const [candidates,setCandidates]=useState(()=>initialCandidates.filter(c=>c.consentPool&&c.shareActive));
   const [filter,setFilter]=useState({location:"",industry:"",years:"",field:"",activelyExploring:"",workingModel:"",contractType:""});
   const [search,setSearch]=useState("");
@@ -2626,7 +2646,7 @@ function PublicPage({onRequest,session,company,initialCandidates=[],initialSelec
                       <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 3px"}}>Available</p><p style={{fontSize:13,margin:0}}>{selected.onboard||"—"}</p></div>
                       <div><p style={{fontSize:11,fontWeight:700,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.5,margin:"0 0 3px"}}>Actively Exploring</p>{selected.activelyExploring?<Badge color={selected.activelyExploring==="Yes"?"green":"gray"}>{selected.activelyExploring}</Badge>:<p style={{fontSize:13,margin:0}}>—</p>}</div>
                     </div>
-                    <Btn onClick={()=>setShowContactForm(true)} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"12px",marginTop:16}}><Icon name="send" size={14}/>Contact Request</Btn>
+                    <Btn onClick={()=>session?setShowContactForm(true):onNeedSignIn&&onNeedSignIn()} style={{width:"100%",justifyContent:"center",fontSize:14,padding:"12px",marginTop:16}}><Icon name="send" size={14}/>{session?"Contact Request":"Sign in to contact"}</Btn>
                   </Card>
                 </div>
               </div>
@@ -2853,7 +2873,7 @@ function PostJobPage({onBack,onSuccess,company,session}){
 }
 
 // ── JOBS ───────────────────────────────────────────────────────────────────────
-function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApplications=[],initialSelectedCode=""}){
+function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApplications=[],initialSelectedCode="",onNeedSignIn}){
   const [jobs,setJobs]=useState(()=>initialJobs.filter(j=>j.status==="active"));
   const [companies,setCompanies]=useState(initialCompanies);
   const [filter,setFilter]=useState({location:"",industry:"",years:"",field:"",workingModel:"",contractType:""});
@@ -2864,7 +2884,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   const [submitted,setSubmitted]=useState(false);
   const [alreadyApplied,setAlreadyApplied]=useState(false);
   const [isApplying,setIsApplying]=useState(false);
-  const [appliedCodes,setAppliedCodes]=useState(()=>new Set(initialApplications.filter(a=>a.candidateCode===session.code||(a.email&&a.email.toLowerCase()===session.email.toLowerCase())).map(a=>a.jobCode)));
+  const [appliedCodes,setAppliedCodes]=useState(()=>new Set(initialApplications.filter(a=>a.candidateCode===session?.code||(a.email&&session?.email&&a.email.toLowerCase()===session.email.toLowerCase())).map(a=>a.jobCode)));
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
   const triedAutoOpen=useRef(false);
 
@@ -2896,7 +2916,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   };
   useEffect(()=>{
     (async()=>{
-      if(session.role==="jobseeker"){
+      if(session?.role==="jobseeker"){
         // One batched round-trip for Jobs+Companies+Applied instead of two
         // separate sequential fetches — cuts time-to-interactive on this tab.
         const [{d,co,apps},profile]=await Promise.all([
@@ -2928,7 +2948,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   const openJob=async(j)=>{
     setSelected(j);setSubmitted(false);setErrors({});
     pushRoute("jobs",j.code);
-    if(session.role!=="jobseeker")return;
+    if(!session||session.role!=="jobseeker")return;
     // "Already applied?" is answered from the appliedCodes state (kept in
     // sync on mount and right after a successful apply) instead of fetching
     // the entire, ever-growing Applied table over the network on every single
@@ -2945,6 +2965,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   const closeJob=()=>{setSelected(null);replaceRoute("jobs","");};
 
   const apply=async()=>{
+    if(!session){onNeedSignIn&&onNeedSignIn();return;}
     if(alreadyApplied||isApplying)return;
     const e={};
     if(!form.name.trim())e.name="Required";
@@ -3030,7 +3051,13 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
           <div style={{display:"grid",gridTemplateColumns:"1fr 280px",gap:"1.5rem",alignItems:"start"}}>
             <div>
               <Card><h3 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"0 0 10px"}}>Job Description</h3><p style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.summary||""}}/><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.description||""}}/><h4 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"1rem 0 8px"}}>Requirements</h4><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:"0 0 1rem"}} dangerouslySetInnerHTML={{__html:selected.requirements||""}}/>{selected.benefits&&<><h4 style={{fontSize:12,fontWeight:800,color:BRAND,textTransform:"uppercase",letterSpacing:1,margin:"1rem 0 8px"}}>Benefits</h4><div style={{fontSize:14,lineHeight:1.8,whiteSpace:"pre-wrap",margin:0}} dangerouslySetInnerHTML={{__html:selected.benefits||""}}/></>}</Card>
-              {session.role!=="jobseeker"?(
+              {!session?(
+                <div style={{textAlign:"center",background:BRAND_LIGHT,borderRadius:14,padding:"1.5rem"}}>
+                  <Icon name="lock" size={28} style={{color:BRAND}}/>
+                  <p style={{fontSize:13,color:BRAND,margin:"10px 0 14px",fontWeight:600}}>Sign in to apply for this job.</p>
+                  <Btn onClick={onNeedSignIn} style={{margin:"0 auto"}}>Sign in →</Btn>
+                </div>
+              ):session.role!=="jobseeker"?(
                 <div style={{textAlign:"center",background:"var(--color-background-secondary)",borderRadius:14,padding:"1.5rem"}}>
                   <Icon name="eye" size={28} style={{color:BRAND_DIM}}/>
                   <p style={{fontSize:13,color:"var(--color-text-secondary)",margin:"10px 0 0"}}>You're viewing this listing as an employer — applying is only available for job seeker accounts.</p>
@@ -3558,7 +3585,10 @@ function App(){
   const [company,setCompany]=useState(null);   // employer's company profile, or undefined until checked
   const [companyChecked,setCompanyChecked]=useState(false);
   const [booting,setBooting]=useState(true);
-  const [page,setPage]=useState("candidate");
+  const [page,setPage]=useState(()=>{
+    const r=initialRouteRef.current;
+    return (r.page==="public"||r.page==="jobs")?r.page:"candidate";
+  });
   const [prevPage,setPrevPage]=useState("candidate");
   const [refresh,setRefresh]=useState(0);
   const [notifCount,setNotifCount]=useState(0);
@@ -3607,8 +3637,12 @@ function App(){
   useEffect(()=>{
     const onPopState=()=>{
       const route=parseRoute();
-      if(!role||!route.page||route.page==="admin")return;
-      const allowedPages={notifications:true,public:true,jobs:true,candidate:role==="jobseeker",employer:role==="employer"};
+      if(!route.page||route.page==="admin")return;
+      // "public"/"jobs" are viewable while signed out, so they sync regardless
+      // of role; anything else still requires a matching signed-in role.
+      if(route.page==="public"||route.page==="jobs"){setPage(route.page);return;}
+      if(!role)return;
+      const allowedPages={notifications:true,candidate:role==="jobseeker",employer:role==="employer"};
       if(allowedPages[route.page])setPage(route.page);
     };
     window.addEventListener("popstate",onPopState);
@@ -3730,6 +3764,33 @@ function App(){
   // Admin console (talent pool & jobs moderation) — accessible via #admin, no
   // job-seeker/employer login required.
   if(isAdmin)return <PageErrorBoundary><AdminGate/></PageErrorBoundary>;
+
+  // Public preview: anyone visiting a Talent Pool / Jobs URL (including a
+  // deep link straight to one candidate or job) sees that content immediately,
+  // signed in or not — matching how job boards normally work. Actions that
+  // need an identity (Apply, Contact Request) prompt sign-in only when
+  // actually attempted, via onNeedSignIn below, rather than blocking the
+  // whole page up front.
+  if(!session&&(page==="public"||page==="jobs")){
+    const navigateGuest=destination=>{ setPage(destination); pushRoute(destination); };
+    const needSignIn=()=>{ setPage(role==="employer"?"employer":"candidate"); }; // falls through to RoleSelection/AuthPage below; the URL (and thus initialRouteRef/parseRoute at sign-in time) still points at whatever was open, so signing in returns here
+    return (
+      <div style={{minHeight:"100vh",background:"var(--color-background-tertiary)",fontFamily:FONT}}>
+        <style>{`
+          @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;500;600;700;800&display=swap');
+          @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+          input,select,textarea{font-family:'Noto Sans Khmer',sans-serif;font-size:13px;padding:8px 12px;border:0.5px solid var(--color-border-secondary);border-radius:8px;outline:none;background:var(--color-background-primary);color:var(--color-text-primary);width:100%;box-sizing:border-box;}
+          input:focus,select:focus,textarea:focus{border-color:${BRAND};box-shadow:0 0 0 3px ${BRAND}18;}
+          select{width:auto;}
+        `}</style>
+        <GuestNav page={page} onNavigate={navigateGuest} onSignIn={needSignIn}/>
+        <PageErrorBoundary key={page}>
+          {page==="public"&&<PublicPage onRequest={()=>{}} session={null} company={null} initialCandidates={[]} initialSelectedCode={parseRoute().sub} onNeedSignIn={needSignIn}/>}
+          {page==="jobs"&&<JobsPage onApply={()=>{}} session={null} initialJobs={[]} initialCompanies={[]} initialApplications={[]} initialSelectedCode={parseRoute().sub} onNeedSignIn={needSignIn}/>}
+        </PageErrorBoundary>
+      </div>
+    );
+  }
 
   if(!role)return <RoleSelection onSelect={r=>setRole(r)}/>;
 
