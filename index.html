@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-18-fast-deeplink-getrow";
+const APP_BUILD="2026-08-18-public-guest-browse";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -2465,37 +2465,16 @@ function PublicPage({onRequest,session,company,initialCandidates=[],initialSelec
   const [isSendingRequest,setIsSendingRequest]=useState(false);
   const rfset=(k,v)=>setReqForm(f=>({...f,[k]:v}));
   const triedAutoOpen=useRef(false);
-  const [needsListFallbackOpen,setNeedsListFallbackOpen]=useState(false);
 
   useEffect(()=>{ld(SK.CANDIDATES,true).then(d=>setCandidates((d||[]).filter(c=>c.consentPool&&c.shareActive)));},[]);
 
-  // Deep link support: "#/talent-pool/<code>" opens that candidate directly.
-  // Uses the lightweight get_row lookup (one record, not the whole table) so
-  // a shared profile link opens fast regardless of how many candidates are
-  // in the pool — this used to wait for the ENTIRE candidates list to finish
-  // loading first, which was the main reason opening a shared link felt slow.
-  // Falls back to waiting on the full list only if an older Apps Script
-  // deployment doesn't recognize "get_row" yet.
+  // Deep link support: "#/talent-pool/<code>" opens that candidate directly
+  // once their data is available, instead of only ever landing on the list.
   useEffect(()=>{
-    if(!initialSelectedCode)return;
-    (async()=>{
-      const composite=await postCompositeAction("get_row",{sheet:"Job Seekers",key:"code",value:initialSelectedCode});
-      if(composite.supported){
-        triedAutoOpen.current=true;
-        // Only open if the candidate is still opted into the Talent Pool —
-        // if they've since turned Share off, an old link shouldn't keep
-        // exposing their profile.
-        if(composite.success&&composite.row&&composite.row.consentPool&&composite.row.shareActive)openCandidate(composite.row);
-        return;
-      }
-      setNeedsListFallbackOpen(true);
-    })();
-  },[]);
-  useEffect(()=>{
-    if(triedAutoOpen.current||!needsListFallbackOpen||!candidates.length)return;
+    if(triedAutoOpen.current||!initialSelectedCode||!candidates.length)return;
     const match=candidates.find(c=>c.code===initialSelectedCode);
     if(match){triedAutoOpen.current=true;openCandidate(match);}
-  },[candidates,needsListFallbackOpen]);
+  },[candidates]);
 
   // Browser Back/Forward while a candidate is open: close/switch to match the
   // URL, rather than leaving a stale modal open after the address bar moved on.
@@ -2908,34 +2887,14 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   const [appliedCodes,setAppliedCodes]=useState(()=>new Set(initialApplications.filter(a=>a.candidateCode===session?.code||(a.email&&session?.email&&a.email.toLowerCase()===session.email.toLowerCase())).map(a=>a.jobCode)));
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
   const triedAutoOpen=useRef(false);
-  const [needsListFallbackOpen,setNeedsListFallbackOpen]=useState(false);
 
-  // Deep link support: "#/jobs/<code>" opens that job directly. Uses the
-  // lightweight get_row lookup (one record, not the whole table) so a shared
-  // job link opens fast regardless of how many jobs are posted — this used
-  // to wait for the ENTIRE jobs list to finish loading first, which was the
-  // main reason opening a shared link felt slow. Falls back to waiting on
-  // the full list only if an older Apps Script deployment doesn't recognize
-  // "get_row" yet.
+  // Deep link support: "#/jobs/<code>" opens that job directly once the list
+  // is loaded, instead of only ever landing on the browse list.
   useEffect(()=>{
-    if(!initialSelectedCode)return;
-    (async()=>{
-      const composite=await postCompositeAction("get_row",{sheet:"Jobs",key:"code",value:initialSelectedCode});
-      if(composite.supported){
-        triedAutoOpen.current=true;
-        // Only open if the job is still active — a deactivated job shouldn't
-        // keep being reachable via an old shared link.
-        if(composite.success&&composite.row&&composite.row.status==="active")openJob(composite.row);
-        return;
-      }
-      setNeedsListFallbackOpen(true);
-    })();
-  },[]);
-  useEffect(()=>{
-    if(triedAutoOpen.current||!needsListFallbackOpen||!jobs.length)return;
+    if(triedAutoOpen.current||!initialSelectedCode||!jobs.length)return;
     const match=jobs.find(j=>j.code===initialSelectedCode);
     if(match){triedAutoOpen.current=true;openJob(match);}
-  },[jobs,needsListFallbackOpen]);
+  },[jobs]);
 
   // Browser Back/Forward while a job is open: close/switch to match the URL.
   useEffect(()=>{
