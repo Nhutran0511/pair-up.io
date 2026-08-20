@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-18-public-guest-browse";
+const APP_BUILD="2026-08-18-deeplink-priority-loading";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -2465,16 +2465,53 @@ function PublicPage({onRequest,session,company,initialCandidates=[],initialSelec
   const [isSendingRequest,setIsSendingRequest]=useState(false);
   const rfset=(k,v)=>setReqForm(f=>({...f,[k]:v}));
   const triedAutoOpen=useRef(false);
+  const [needsListFallbackOpen,setNeedsListFallbackOpen]=useState(false);
+  const [listLoadedOnce,setListLoadedOnce]=useState(false);
+  const [deepLinkLoading,setDeepLinkLoading]=useState(!!initialSelectedCode);
 
-  useEffect(()=>{ld(SK.CANDIDATES,true).then(d=>setCandidates((d||[]).filter(c=>c.consentPool&&c.shareActive)));},[]);
-
-  // Deep link support: "#/talent-pool/<code>" opens that candidate directly
-  // once their data is available, instead of only ever landing on the list.
+  // If we're opening a specific shared link, don't ALSO fire the full-list
+  // fetch at the exact same instant — Apps Script serializes/limits how many
+  // requests from the same client it services at once, so two simultaneous
+  // requests can each end up slower than either run alone. The one-record
+  // lookup below gets priority; the full list (needed for browsing/filtering)
+  // loads right after it settles instead of racing it.
   useEffect(()=>{
-    if(triedAutoOpen.current||!initialSelectedCode||!candidates.length)return;
+    if(!initialSelectedCode){
+      ld(SK.CANDIDATES,true).then(d=>{setCandidates((d||[]).filter(c=>c.consentPool&&c.shareActive));setListLoadedOnce(true);});
+    }
+  },[]);
+
+  // Deep link support: "#/talent-pool/<code>" opens that candidate directly.
+  // Uses the lightweight get_row lookup (one record, not the whole table) so
+  // a shared profile link opens fast regardless of how many candidates are
+  // in the pool — this used to wait for the ENTIRE candidates list to finish
+  // loading first, which was the main reason opening a shared link felt slow.
+  // Falls back to waiting on the full list only if an older Apps Script
+  // deployment doesn't recognize "get_row" yet.
+  useEffect(()=>{
+    if(!initialSelectedCode)return;
+    (async()=>{
+      const composite=await postCompositeAction("get_row",{sheet:"Job Seekers",key:"code",value:initialSelectedCode});
+      if(composite.supported){
+        triedAutoOpen.current=true;
+        // Only open if the candidate is still opted into the Talent Pool —
+        // if they've since turned Share off, an old link shouldn't keep
+        // exposing their profile.
+        if(composite.success&&composite.row&&composite.row.consentPool&&composite.row.shareActive)openCandidate(composite.row);
+        setDeepLinkLoading(false);
+        ld(SK.CANDIDATES,true).then(d=>{setCandidates((d||[]).filter(c=>c.consentPool&&c.shareActive));setListLoadedOnce(true);});
+        return;
+      }
+      setNeedsListFallbackOpen(true);
+      ld(SK.CANDIDATES,true).then(d=>{setCandidates((d||[]).filter(c=>c.consentPool&&c.shareActive));setListLoadedOnce(true);});
+    })();
+  },[]);
+  useEffect(()=>{
+    if(triedAutoOpen.current||!needsListFallbackOpen||!listLoadedOnce)return;
     const match=candidates.find(c=>c.code===initialSelectedCode);
     if(match){triedAutoOpen.current=true;openCandidate(match);}
-  },[candidates]);
+    setDeepLinkLoading(false);
+  },[candidates,needsListFallbackOpen,listLoadedOnce]);
 
   // Browser Back/Forward while a candidate is open: close/switch to match the
   // URL, rather than leaving a stale modal open after the address bar moved on.
@@ -2547,6 +2584,12 @@ function PublicPage({onRequest,session,company,initialCandidates=[],initialSelec
 
   return(
     <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
+      {deepLinkLoading&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(255,255,255,0.85)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,zIndex:400}}>
+          <Icon name="loader-2" size={28} style={{color:BRAND,animation:"spin 1s linear infinite"}}/>
+          <p style={{fontSize:13,color:BRAND,fontWeight:600,margin:0}}>Loading this profile...</p>
+        </div>
+      )}
       <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Talent Pool</h1>
       <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>Browse candidates who are open to new opportunities</p>
 
@@ -2887,14 +2930,45 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
   const [appliedCodes,setAppliedCodes]=useState(()=>new Set(initialApplications.filter(a=>a.candidateCode===session?.code||(a.email&&session?.email&&a.email.toLowerCase()===session.email.toLowerCase())).map(a=>a.jobCode)));
   const sf=(k,v)=>setForm(f=>({...f,[k]:v}));
   const triedAutoOpen=useRef(false);
+  const [needsListFallbackOpen,setNeedsListFallbackOpen]=useState(false);
+  const [listLoadedOnce,setListLoadedOnce]=useState(false);
+  const [deepLinkLoading,setDeepLinkLoading]=useState(!!initialSelectedCode);
+  const deepLinkLoadingRef=useRef(!!initialSelectedCode);
+  const finishDeepLinkLoading=()=>{deepLinkLoadingRef.current=false;setDeepLinkLoading(false);};
 
-  // Deep link support: "#/jobs/<code>" opens that job directly once the list
-  // is loaded, instead of only ever landing on the browse list.
+  // Deep link support: "#/jobs/<code>" opens that job directly. Uses the
+  // lightweight get_row lookup (one record, not the whole table) so a shared
+  // job link opens fast regardless of how many jobs are posted — this used
+  // to wait for the ENTIRE jobs list to finish loading first, which was the
+  // main reason opening a shared link felt slow. Falls back to waiting on
+  // the full list only if an older Apps Script deployment doesn't recognize
+  // "get_row" yet. Deliberately does NOT run alongside the full-list fetch
+  // below — Apps Script serializes/limits simultaneous requests from the same
+  // client, so firing both at once made each one slower than running alone.
   useEffect(()=>{
-    if(triedAutoOpen.current||!initialSelectedCode||!jobs.length)return;
+    if(!initialSelectedCode)return;
+    (async()=>{
+      const composite=await postCompositeAction("get_row",{sheet:"Jobs",key:"code",value:initialSelectedCode});
+      if(composite.supported){
+        triedAutoOpen.current=true;
+        // Only open if the job is still active — a deactivated job shouldn't
+        // keep being reachable via an old shared link.
+        if(composite.success&&composite.row&&composite.row.status==="active")openJob(composite.row);
+        finishDeepLinkLoading();
+        return;
+      }
+      // Older backend without get_row: release the gate so the full-list
+      // fetch below can run (it's the only way left to find this job).
+      deepLinkLoadingRef.current=false;
+      setNeedsListFallbackOpen(true);
+    })();
+  },[]);
+  useEffect(()=>{
+    if(triedAutoOpen.current||!needsListFallbackOpen||!listLoadedOnce)return;
     const match=jobs.find(j=>j.code===initialSelectedCode);
     if(match){triedAutoOpen.current=true;openJob(match);}
-  },[jobs]);
+    finishDeepLinkLoading();
+  },[jobs,needsListFallbackOpen,listLoadedOnce]);
 
   // Browser Back/Forward while a job is open: close/switch to match the URL.
   useEffect(()=>{
@@ -2913,9 +2987,15 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
     const {d,co}=await ldMany({d:SK.JOBS,co:SK.COMPANIES});
     setJobs((d||[]).filter(j=>j.status==="active"));
     setCompanies(co||[]);
+    setListLoadedOnce(true);
   };
   useEffect(()=>{
     (async()=>{
+      // If a specific job was requested via URL, let that lightweight lookup
+      // (above) finish first instead of racing it with this full-list fetch.
+      if(initialSelectedCode){
+        while(deepLinkLoadingRef.current)await new Promise(r=>setTimeout(r,60));
+      }
       if(session?.role==="jobseeker"){
         // One batched round-trip for Jobs+Companies+Applied instead of two
         // separate sequential fetches — cuts time-to-interactive on this tab.
@@ -2926,6 +3006,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
         setJobs((d||[]).filter(j=>j.status==="active"));
         setCompanies(co||[]);
         setAppliedCodes(new Set((apps||[]).filter(a=>a.candidateCode===session.code||(profile?.email&&a.email===profile.email)).map(a=>a.jobCode)));
+        setListLoadedOnce(true);
       }else{
         await load();
       }
@@ -3002,6 +3083,12 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
 
   return(
     <div style={{maxWidth:1200,margin:"2rem auto",padding:"0 1rem 4rem",fontFamily:FONT}}>
+      {deepLinkLoading&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(255,255,255,0.85)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:12,zIndex:400}}>
+          <Icon name="loader-2" size={28} style={{color:BRAND,animation:"spin 1s linear infinite"}}/>
+          <p style={{fontSize:13,color:BRAND,fontWeight:600,margin:0}}>Loading this job...</p>
+        </div>
+      )}
       <h1 style={{fontSize:26,fontWeight:800,marginBottom:4}}>Jobs</h1>
       <p style={{color:"var(--color-text-secondary)",fontSize:13,marginBottom:"1.5rem"}}>Browse all active jobs posted on pairup.</p>
       <div style={{position:"relative",marginBottom:"1rem"}}>
