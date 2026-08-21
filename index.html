@@ -34,7 +34,7 @@ const FONT="'Noto Sans Khmer',sans-serif";
 // Bump this string with every meaningful update. Visible in the Admin page
 // footer so it's easy to confirm a deployment is actually running the latest
 // code (vs. a stale cached/old file on hosting).
-const APP_BUILD="2026-08-18-deeplink-priority-loading";
+const APP_BUILD="2026-08-21-fix-external-links";
 const SK={CANDIDATES:"pairup_candidates",JOBS:"pairup_jobs",REQUESTS:"pairup_requests",NOTIFS:"pairup_notifs",APPLICATIONS:"pairup_applications",VIEWED_REQUESTS:"pairup_viewed_requests",COUNTER:"pairup_counter",ACCOUNTS_JS:"pairup_accounts_jobseeker",ACCOUNTS_EMP:"pairup_accounts_employer",COMPANIES:"pairup_companies",SESSION:"pairup_session"};
 const GSHEET_URL_KEY="pairup_gsheet_webapp_url";
 // Deployed Apps Script Web App URL — baked in so every visitor (any browser,
@@ -160,6 +160,18 @@ function stripHtml(html){if(!html)return"";return html.replace(/<[^>]*>/g," ").r
 // string — which took down the whole page (blank screen, no error boundary)
 // for Talent Pool/Jobs whenever an older record was in the list.
 function asArr(v){return Array.isArray(v)?v:(v?[v]:[]);}
+// Company websites are often saved without a scheme (e.g. "viralhire.net").
+// Used bare as an <a href>, a browser treats that as a RELATIVE path on the
+// CURRENT site rather than an external address — e.g. clicking it from
+// pairup.site would navigate to "pairup.site/viralhire.net" (a 404) instead
+// of actually opening viralhire.net in a new tab. Normalizing at render time
+// fixes this for both old and new records without needing a data migration.
+function normalizeUrl(url){
+  if(!url)return "";
+  const trimmed=String(url).trim();
+  if(!trimmed)return "";
+  return /^https?:\/\//i.test(trimmed)?trimmed:"https://"+trimmed;
+}
 
 // ── URL routing ─────────────────────────────────────────────────────────
 // Reflects the current section in the address bar (hash-based, since this is
@@ -2213,7 +2225,7 @@ Response timestamp: ${respondedAt}`
     <div style={{borderBottom:"0.5px solid var(--color-border-tertiary)",paddingBottom:12}}>
       <p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",letterSpacing:0.8,margin:"0 0 5px"}}>{label}</p>
       {link&&value
-        ?<a href={value} target="_blank" rel="noreferrer" style={{fontSize:14,color:BRAND,fontWeight:500,wordBreak:"break-all"}}>{value}</a>
+        ?<a href={normalizeUrl(value)} target="_blank" rel="noreferrer" style={{fontSize:14,color:BRAND,fontWeight:500,wordBreak:"break-all"}}>{value}</a>
         :<p style={{fontSize:14,fontWeight:value?500:400,margin:0,color:value?"var(--color-text-primary)":"#bbb",fontStyle:value?"normal":"italic"}}>{value||"—"}</p>
       }
     </div>
@@ -3164,7 +3176,7 @@ function JobsPage({onApply,session,initialJobs=[],initialCompanies=[],initialApp
                   {jc?(<>
                     <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:"0 0 10px"}}>{jc.industry}{jc.teamSize?` · ${jc.teamSize} employees`:""}</p>
                     {jc.address&&<p style={{fontSize:12,margin:"0 0 8px",display:"flex",gap:6}}><Icon name="map-pin" size={13} style={{color:BRAND_DIM,flexShrink:0,marginTop:2}}/>{jc.address}</p>}
-                    {jc.website&&<p style={{fontSize:12,margin:"0 0 10px",display:"flex",gap:6}}><Icon name="world" size={13} style={{color:BRAND_DIM,flexShrink:0,marginTop:2}}/><a href={jc.website} target="_blank" rel="noreferrer" style={{color:BRAND}}>{jc.website}</a></p>}
+                    {jc.website&&<p style={{fontSize:12,margin:"0 0 10px",display:"flex",gap:6}}><Icon name="world" size={13} style={{color:BRAND_DIM,flexShrink:0,marginTop:2}}/><a href={normalizeUrl(jc.website)} target="_blank" rel="noreferrer" style={{color:BRAND}}>{jc.website}</a></p>}
                     {jc.intro&&<p style={{fontSize:13,lineHeight:1.7,margin:0,paddingTop:8,borderTop:"0.5px solid var(--color-border-tertiary)"}}>{jc.intro}</p>}
                   </>):(
                     <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:0,fontStyle:"italic"}}>No additional company information provided.</p>
@@ -3376,7 +3388,7 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated,initialTa
             <h3 style={{fontSize:17,fontWeight:800,color:BRAND,margin:"0 0 3px"}}>{company.name}</h3>
             <p style={{fontSize:12,color:"var(--color-text-secondary)",margin:"0 0 6px"}}>{company.industry}{company.teamSize?` · ${company.teamSize} employees`:""}{company.taxCode?` · Tax code ${company.taxCode}`:""}</p>
             {company.address&&<p style={{fontSize:12,margin:"0 0 4px",display:"flex",gap:6,alignItems:"flex-start"}}><Icon name="map-pin" size={13} style={{color:BRAND_DIM,flexShrink:0,marginTop:2}}/>{company.address}</p>}
-            {company.website&&<p style={{fontSize:12,margin:"0 0 8px",display:"flex",gap:6,alignItems:"flex-start"}}><Icon name="world" size={13} style={{color:BRAND_DIM,flexShrink:0,marginTop:2}}/><a href={company.website} target="_blank" rel="noreferrer" style={{color:BRAND}}>{company.website}</a></p>}
+            {company.website&&<p style={{fontSize:12,margin:"0 0 8px",display:"flex",gap:6,alignItems:"flex-start"}}><Icon name="world" size={13} style={{color:BRAND_DIM,flexShrink:0,marginTop:2}}/><a href={normalizeUrl(company.website)} target="_blank" rel="noreferrer" style={{color:BRAND}}>{company.website}</a></p>}
             {company.intro&&<p style={{fontSize:13,lineHeight:1.7,margin:0,maxWidth:640}}>{company.intro}</p>}
           </div>
         </div>
@@ -3471,8 +3483,8 @@ function EmployerPage({onPost,refresh,session,company,onCompanyUpdated,initialTa
                   ))}
                 </div>
                 <div style={{marginTop:"1rem",display:"flex",flexDirection:"column",gap:8}}>
-                  <div><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>CV / Resume</p>{candidate?.cvLink?<a href={candidate.cvLink} target="_blank" rel="noreferrer" style={{fontSize:13,color:BRAND,wordBreak:"break-all"}}>{candidate.cvLink}</a>:<p style={{fontSize:13,margin:0,color:"var(--color-text-secondary)"}}>Not provided</p>}</div>
-                  <div><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>Portfolio</p>{candidate?.portfolio?<a href={candidate.portfolio} target="_blank" rel="noreferrer" style={{fontSize:13,color:BRAND,wordBreak:"break-all"}}>{candidate.portfolio}</a>:<p style={{fontSize:13,margin:0,color:"var(--color-text-secondary)"}}>Not provided</p>}</div>
+                  <div><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>CV / Resume</p>{candidate?.cvLink?<a href={normalizeUrl(candidate.cvLink)} target="_blank" rel="noreferrer" style={{fontSize:13,color:BRAND,wordBreak:"break-all"}}>{candidate.cvLink}</a>:<p style={{fontSize:13,margin:0,color:"var(--color-text-secondary)"}}>Not provided</p>}</div>
+                  <div><p style={{fontSize:10,fontWeight:800,color:BRAND_DIM,textTransform:"uppercase",margin:"0 0 4px"}}>Portfolio</p>{candidate?.portfolio?<a href={normalizeUrl(candidate.portfolio)} target="_blank" rel="noreferrer" style={{fontSize:13,color:BRAND,wordBreak:"break-all"}}>{candidate.portfolio}</a>:<p style={{fontSize:13,margin:0,color:"var(--color-text-secondary)"}}>Not provided</p>}</div>
                 </div>
               </div>
             ):(
